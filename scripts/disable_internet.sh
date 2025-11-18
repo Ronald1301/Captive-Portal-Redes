@@ -44,25 +44,15 @@ iptables -A INPUT -i $LAN_IF -p tcp --dport 53 -j ACCEPT
 iptables -A INPUT -i $LAN_IF -p tcp --dport 80 -j ACCEPT
 iptables -A INPUT -i $LAN_IF -p tcp --dport 443 -j ACCEPT
 
-# Detectar si existen certificados SSL para determinar puerto de redirección
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-if [ -f "$PROJECT_DIR/certs/server.crt" ] && [ -f "$PROJECT_DIR/certs/server.key" ]; then
-    # Redirigir tráfico HTTP y HTTPS al puerto 443 (HTTPS)
-    iptables -t nat -A PREROUTING -i $LAN_IF -p tcp --dport 80 -j DNAT --to-destination $LAN_IP:443
-    iptables -t nat -A PREROUTING -i $LAN_IF -p tcp --dport 443 -j DNAT --to-destination $LAN_IP:443
-    REDIRECT_PORT=443
-    REDIRECT_PROTOCOL="HTTPS"
-else
-    # Redirigir tráfico HTTP y HTTPS al puerto 80 (HTTP)
-    iptables -t nat -A PREROUTING -i $LAN_IF -p tcp --dport 80 -j DNAT --to-destination $LAN_IP:80
-    iptables -t nat -A PREROUTING -i $LAN_IF -p tcp --dport 443 -j DNAT --to-destination $LAN_IP:80
-    REDIRECT_PORT=80
-    REDIRECT_PROTOCOL="HTTP"
-fi
+# Redirigir todo el tráfico HTTP al puerto 80 del gateway (portal cautivo)
+iptables -t nat -A PREROUTING -i $LAN_IF -p tcp --dport 80 -j DNAT --to-destination $LAN_IP:80
+
+# Redirigir tráfico HTTPS al puerto 80 también (o podrías usar 443 si tienes HTTPS)
+iptables -t nat -A PREROUTING -i $LAN_IF -p tcp --dport 443 -j DNAT --to-destination $LAN_IP:80
 
 # Marcar conexiones desde LAN (para identificarlas después)
 iptables -t mangle -A PREROUTING -i $LAN_IF -j MARK --set-mark 99
 
 echo "✓ Internet bloqueado para hosts de LAN"
-echo "✓ Tráfico HTTP/HTTPS redirigido al portal cautivo ($REDIRECT_PROTOCOL://$LAN_IP:$REDIRECT_PORT)"
+echo "✓ Tráfico HTTP/HTTPS redirigido al portal cautivo ($LAN_IP:80)"
 echo "✓ Interfaces: LAN=$LAN_IF ($LAN_IP), WAN=$WAN_IF"
