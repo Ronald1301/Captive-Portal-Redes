@@ -1,6 +1,6 @@
 #!/bin/bash
-# Script de inicialización del portal cautivo
-# Bloquea internet e inicia servidor web
+# Script de inicialización completa del portal cautivo
+# Configura NAT, bloquea internet, inicia DNS y servidor web
 
 set -e  # Salir si hay algún error
 
@@ -49,8 +49,13 @@ sysctl -w net.ipv4.ip_forward=1 > /dev/null
 echo "   ✓ IP forwarding habilitado"
 echo ""
 
+# Configurar NAT
+echo "3. Configurando NAT (masquerading)..."
+bash "$SCRIPT_DIR/nat_setup.sh"
+echo ""
+
 # Bloquear internet y configurar redirecciones
-echo "3. Bloqueando internet y configurando redirecciones..."
+echo "4. Bloqueando internet y configurando redirecciones..."
 bash "$SCRIPT_DIR/disable_internet.sh"
 echo ""
 
@@ -84,13 +89,27 @@ cleanup() {
 
 trap cleanup EXIT INT TERM
 
-# Iniciar servidor web
-echo "4. Iniciando servidor web del portal..."
+# Iniciar servidor DNS
+echo "5. Iniciando servidor DNS falso (puerto 53)..."
+python3 "$PROJECT_DIR/dns_server.py" --ip $LAN_IP > /dev/null 2>&1 &
+DNS_PID=$!
+echo $DNS_PID > "$PID_FILE"
+sleep 1
 
+if ps -p $DNS_PID > /dev/null; then
+    echo "   ✓ Servidor DNS iniciado (PID: $DNS_PID)"
+else
+    echo "   ❌ ERROR: No se pudo iniciar el servidor DNS"
+    exit 1
+fi
+echo ""
+
+# Iniciar servidor web
+echo "6. Iniciando servidor web del portal (puerto 80)..."
 cd "$PROJECT_DIR"
-python3 server.py > /dev/null 2>&1 &
+python3 server.py --host 0.0.0.0 --port 80 > /dev/null 2>&1 &
 WEB_PID=$!
-echo $WEB_PID > "$PID_FILE"
+echo $WEB_PID >> "$PID_FILE"
 sleep 1
 
 if ps -p $WEB_PID > /dev/null; then
@@ -109,16 +128,15 @@ echo "Configuración:"
 echo "  • Gateway IP: $LAN_IP"
 echo "  • Interfaz LAN: $LAN_IF"
 echo "  • Interfaz WAN: $WAN_IF"
-echo "  • Protocolo: HTTP"
 echo "  • Puerto web: 80"
+echo "  • Puerto DNS: 53"
 echo ""
 echo "Los dispositivos en la red deben configurar:"
 echo "  • Gateway: $LAN_IP"
-echo ""
-echo "Acceso al portal:"
-echo "  • http://$LAN_IP/"
+echo "  • DNS: $LAN_IP"
 echo ""
 echo "Logs en tiempo real:"
+echo "  • DNS: ps -f -p $DNS_PID"
 echo "  • Web: ps -f -p $WEB_PID"
 echo ""
 echo "Presiona Ctrl+C para detener el portal"
