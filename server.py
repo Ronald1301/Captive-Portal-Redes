@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Servidor HTTP para portal cautivo usando sockets puros.
+Servidor HTTP/HTTPS para portal cautivo usando sockets puros.
 Implementación manual sin usar http.server - solo sockets y threading.
+Soporta SSL/TLS para conexiones seguras.
 Ejecutar con privilegios si se quiere que lance scripts de iptables.
 """
 import os
 import sys
+import uuid
 import json
 import threading
+import argparse
+import subprocess
+import re
 import socket
 import secrets
+import ssl
 from urllib.parse import parse_qs
 
 from auth import verify_user, load_users
@@ -17,9 +23,21 @@ from auth import verify_user, load_users
 ROOT = os.path.dirname(__file__)
 TEMPLATES = os.path.join(ROOT, 'templates')
 
-# sessions: session_id -> {user, ip}
+# sessions: session_id -> {user, ip, mac}
 SESSIONS = {}
 SESSIONS_LOCK = threading.Lock()
+
+
+def get_mac(ip):
+    """Intento simple de obtener MAC desde ARP cache (Linux)."""
+    try:
+        p = subprocess.run(['arp', '-n', ip], capture_output=True, text=True)
+        m = re.search(r'([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})', p.stdout, re.I)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        return None
+    return None
 
 
 def load_template(name):
@@ -80,7 +98,11 @@ def parse_http_request(request_data):
 
 def is_authorized(headers, client_ip):
     """
-    Verifica si el cliente está autorizado mediante verificación de token de sesión.
+    Verifica si el cliente está autorizado.
+    Implementa control anti-suplantación de IP mediante verificación de:
+    1. Token de sesión válido
+    2. IP del cliente coincide con IP de la sesión
+    3. Dirección MAC coincide (si está disponible)
     """
     cookie_header = headers.get('Cookie', '')
     cookies = parse_cookies(cookie_header)
@@ -95,9 +117,34 @@ def is_authorized(headers, client_ip):
     if not session:
         return False
     
+    # CONTROL ANTI-SUPLANTACIÓN:
     # Verificar que la IP coincida con la IP registrada en la sesión
     if session.get('ip') != client_ip:
-        return False
+        # Obtener MAC actual del cliente
+        current_mac = get_mac(client_ip)
+        session_mac = session.get('mac')
+        
+        # Si tenemos ambas MACs, verificar que coincidan
+        if session_mac and current_mac:
+            if current_mac == session_mac:
+                # MAC coincide pero IP cambió - actualizar IP en sesión
+                # Esto puede pasar con DHCP renovando la lease
+                with SESSIONS_LOCK:
+                    session['ip'] = client_ip
+                print(f'⚠ IP changed for session {session_id[:8]}... (MAC: {current_mac})')
+                print(f'  Old IP: {session.get("ip")} → New IP: {client_ip}')
+                return True
+            else:
+                # MAC no coincide - posible ataque de suplantación
+                print(f'🚨 SPOOFING ATTEMPT DETECTED!')
+                print(f'   Session {session_id[:8]}... registered to IP {session.get("ip")} (MAC: {session_mac})')
+                print(f'   But request came from IP {client_ip} (MAC: {current_mac})')
+                return False
+        else:
+            # No podemos verificar MAC - denegar por seguridad
+            print(f'⚠ IP mismatch without MAC verification for session {session_id[:8]}...')
+            print(f'   Expected: {session.get("ip")}, Got: {client_ip}')
+            return False
     
     return True
 
@@ -183,16 +230,17 @@ def handle_post_request(client_socket, path, headers, body, client_ip):
         if verify_user(username, password):
             # Crear sesión con token seguro
             session_id = secrets.token_urlsafe(32)
+            mac = get_mac(client_ip)
             
             with SESSIONS_LOCK:
                 SESSIONS[session_id] = {
                     'user': username,
-                    'ip': client_ip
+                    'ip': client_ip,
+                    'mac': mac
                 }
             
             # Habilitar internet para esta IP
             try:
-                import subprocess
                 script_path = os.path.join(ROOT, 'scripts', 'enable_internet.sh')
                 subprocess.Popen(['sudo', script_path, client_ip],
                                stdout=subprocess.DEVNULL,
@@ -306,12 +354,16 @@ def handle_client(client_socket, client_address):
 
 
 class CaptivePortalServer:
-    """Servidor HTTP manual usando sockets puros"""
+    """Servidor HTTP/HTTPS manual usando sockets puros con soporte SSL"""
     
-    def __init__(self, host='0.0.0.0', port=80):
+    def __init__(self, host='0.0.0.0', port=80, use_ssl=False, certfile=None, keyfile=None):
         self.host = host
         self.port = port
+        self.use_ssl = use_ssl
+        self.certfile = certfile
+        self.keyfile = keyfile
         self.server_socket = None
+        self.ssl_context = None
         self.running = False
     
     def start(self):
@@ -332,13 +384,36 @@ class CaptivePortalServer:
                 print('   Ports below 1024 require root privileges. Run with sudo.')
             sys.exit(1)
         
+        # Configurar SSL si está habilitado
+        if self.use_ssl:
+            if not self.certfile or not self.keyfile:
+                print('❌ Error: SSL enabled but no certificate/key files provided')
+                sys.exit(1)
+            
+            if not os.path.exists(self.certfile) or not os.path.exists(self.keyfile):
+                print('❌ Error: Certificate or key file not found')
+                print(f'   Certificate: {self.certfile}')
+                print(f'   Key: {self.keyfile}')
+                print('')
+                print('Generate certificates with: bash generate_cert.sh')
+                sys.exit(1)
+            
+            try:
+                self.ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+                self.ssl_context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
+                print(f'✓ SSL/TLS enabled with certificate: {self.certfile}')
+            except Exception as e:
+                print(f'❌ Error loading SSL certificates: {e}')
+                sys.exit(1)
+        
         # Escuchar conexiones entrantes (backlog de 10 conexiones pendientes)
         self.server_socket.listen(10)
         
         self.running = True
         
+        protocol = 'HTTPS' if self.use_ssl else 'HTTP'
         print('========================================')
-        print('   CAPTIVE PORTAL SERVER (HTTP)')
+        print(f'   CAPTIVE PORTAL SERVER ({protocol})')
         print('   (Manual Socket Implementation)')
         print('========================================')
         print(f'Listening on {self.host}:{self.port}')
@@ -352,6 +427,18 @@ class CaptivePortalServer:
             try:
                 # Aceptar una conexión entrante (bloqueante)
                 client_socket, client_address = self.server_socket.accept()
+                
+                # Envolver con SSL si está habilitado
+                if self.use_ssl:
+                    try:
+                        client_socket = self.ssl_context.wrap_socket(client_socket, server_side=True)
+                    except Exception as e:
+                        print(f'SSL handshake failed with {client_address[0]}: {e}')
+                        try:
+                            client_socket.close()
+                        except:
+                            pass
+                        continue
                 
                 # Manejar el cliente en un thread separado (concurrencia)
                 client_thread = threading.Thread(
@@ -378,8 +465,41 @@ class CaptivePortalServer:
                 pass
 
 
+def parse_args():
+    p = argparse.ArgumentParser(description='Captive Portal Server - Manual Socket Implementation with SSL/TLS')
+    p.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
+    p.add_argument('--port', type=int, help='Port to bind to (default: 80 for HTTP, 443 for HTTPS)')
+    p.add_argument('--ssl', action='store_true', help='Enable HTTPS with SSL/TLS')
+    p.add_argument('--cert', help='Path to SSL certificate file (required with --ssl)')
+    p.add_argument('--key', help='Path to SSL key file (required with --ssl)')
+    return p.parse_args()
+
+
 def main():
-    server = CaptivePortalServer(host='0.0.0.0', port=80)
+    args = parse_args()
+    
+    # Determinar puerto por defecto
+    if args.port is None:
+        args.port = 443 if args.ssl else 80
+    
+    # Validar SSL
+    use_ssl = args.ssl
+    certfile = args.cert
+    keyfile = args.key
+    
+    if use_ssl and (not certfile or not keyfile):
+        print('❌ Error: --ssl requires both --cert and --key')
+        print('   Generate certificates with: bash generate_cert.sh')
+        print('   Then run: sudo python3 server.py --ssl --cert certs/server.crt --key certs/server.key')
+        sys.exit(1)
+    
+    server = CaptivePortalServer(
+        host=args.host, 
+        port=args.port,
+        use_ssl=use_ssl,
+        certfile=certfile,
+        keyfile=keyfile
+    )
     
     try:
         server.start()
