@@ -105,10 +105,29 @@ fi
 echo ""
 
 # Iniciar servidor web
-echo "6. Iniciando servidor web del portal (puerto 80)..."
-cd "$PROJECT_DIR"
-python3 server.py --host 0.0.0.0 --port 80 > /dev/null 2>&1 &
-WEB_PID=$!
+echo "6. Iniciando servidor web del portal..."
+
+# Detectar si existen certificados SSL
+CERT_FILE="$PROJECT_DIR/certs/server.crt"
+KEY_FILE="$PROJECT_DIR/certs/server.key"
+
+if [ -f "$CERT_FILE" ] && [ -f "$KEY_FILE" ]; then
+    echo "   ✓ Certificados SSL encontrados - Iniciando en modo HTTPS (puerto 443)"
+    cd "$PROJECT_DIR"
+    python3 server.py --ssl --cert "$CERT_FILE" --key "$KEY_FILE" --host 0.0.0.0 > /dev/null 2>&1 &
+    WEB_PID=$!
+    WEB_PORT=443
+    WEB_PROTOCOL="HTTPS"
+else
+    echo "   ℹ Certificados SSL no encontrados - Iniciando en modo HTTP (puerto 80)"
+    echo "   (Genera certificados con: bash generate_cert.sh)"
+    cd "$PROJECT_DIR"
+    python3 server.py --host 0.0.0.0 --port 80 > /dev/null 2>&1 &
+    WEB_PID=$!
+    WEB_PORT=80
+    WEB_PROTOCOL="HTTP"
+fi
+
 echo $WEB_PID >> "$PID_FILE"
 sleep 1
 
@@ -128,12 +147,16 @@ echo "Configuración:"
 echo "  • Gateway IP: $LAN_IP"
 echo "  • Interfaz LAN: $LAN_IF"
 echo "  • Interfaz WAN: $WAN_IF"
-echo "  • Puerto web: 80"
+echo "  • Protocolo: $WEB_PROTOCOL"
+echo "  • Puerto web: $WEB_PORT"
 echo "  • Puerto DNS: 53"
 echo ""
 echo "Los dispositivos en la red deben configurar:"
 echo "  • Gateway: $LAN_IP"
 echo "  • DNS: $LAN_IP"
+echo ""
+echo "Acceso al portal:"
+echo "  • $WEB_PROTOCOL://$LAN_IP:$WEB_PORT/"
 echo ""
 echo "Logs en tiempo real:"
 echo "  • DNS: ps -f -p $DNS_PID"
