@@ -14,11 +14,8 @@ if [ -z "$WAN_IF" ] || [ -z "$LAN_IF" ]; then
     exit 1
 fi
 
-# Limpiar reglas existentes
-iptables -F
-iptables -t nat -F
-iptables -t mangle -F
-iptables -X
+# NOTA: NO limpiamos reglas aquí para preservar NAT configurado previamente
+# El flush se hace en start_captive_portal.sh ANTES de llamar a este script
 
 # Política por defecto: denegar forwarding
 iptables -P FORWARD DROP
@@ -32,8 +29,8 @@ iptables -A OUTPUT -o lo -j ACCEPT
 # Permitir tráfico interno (estaciones a gateway)
 iptables -A FORWARD -i $LAN_IF -o $LAN_IF -j ACCEPT
 
-# Permitir conexiones establecidas/relacionadas
-iptables -A FORWARD -i $LAN_IF -o $WAN_IF -m state --state ESTABLISHED,RELATED -j ACCEPT
+# Permitir conexiones establecidas/relacionadas (de vuelta de internet)
+iptables -A FORWARD -i $WAN_IF -o $LAN_IF -m state --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
 
 # Permitir DNS al gateway (puerto 53)
