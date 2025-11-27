@@ -221,35 +221,28 @@ def handle_get_request(client_socket, path, headers, client_ip):
 def handle_post_request(client_socket, path, headers, body, client_ip):
     """Maneja peticiones POST"""
     if path == '/login':
-        # Parsear parámetros del body
+        # LOGIN
         body_str = body.decode('utf-8', errors='ignore')
         params = parse_qs(body_str)
         username = params.get('username', [''])[0]
         password = params.get('password', [''])[0]
-        
         if verify_user(username, password):
-            # Crear sesión con token seguro
             session_id = secrets.token_urlsafe(32)
             mac = get_mac(client_ip)
-            
             with SESSIONS_LOCK:
                 SESSIONS[session_id] = {
                     'user': username,
                     'ip': client_ip,
                     'mac': mac
                 }
-            
-            # Habilitar internet para esta IP
             try:
                 script_path = os.path.join(ROOT, 'scripts', 'enable_internet.sh')
                 subprocess.Popen(['sudo', script_path, client_ip],
-                               stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
                 print(f'✓ Access granted to {client_ip} (user: {username})')
             except Exception as e:
                 print(f'⚠ Warning: Could not enable internet for {client_ip}: {e}')
-            
-            # Redirigir con cookie
             response_headers = {
                 'Location': '/',
                 'Set-Cookie': f'CAPTIVE_SESSION={session_id}; Path=/; HttpOnly',
@@ -257,17 +250,81 @@ def handle_post_request(client_socket, path, headers, body, client_ip):
             }
             send_response(client_socket, 302, 'Found', response_headers, b'')
         else:
-            # Login fallido
-            body = b'<html><body><h1>Login Failed</h1><p>Invalid credentials</p><a href="/">Try again</a></body></html>'
+            html = '<html><body><h1>Login Failed</h1><p>Invalid credentials</p><a href="/">Try again</a></body></html>'
+            body = html.encode('utf-8')
             response_headers = {
                 'Content-Type': 'text/html; charset=utf-8',
                 'Content-Length': str(len(body)),
                 'Connection': 'close'
             }
             send_response(client_socket, 401, 'Unauthorized', response_headers, body)
+    elif path == '/logout':
+        # LOGOUT
+        cookie_header = headers.get('Cookie', '')
+        cookies = parse_cookies(cookie_header)
+        session_id = cookies.get('CAPTIVE_SESSION')
+        user_ip = None
+        if session_id:
+            with SESSIONS_LOCK:
+                session = SESSIONS.pop(session_id, None)
+                if session:
+                    user_ip = session.get('ip')
+        if user_ip:
+            try:
+                script_path = os.path.join(ROOT, 'scripts', 'disable_internet.sh')
+                subprocess.Popen(['sudo', script_path, user_ip],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+                print(f'✗ Access revoked for {user_ip}')
+            except Exception as e:
+                print(f'⚠ Warning: Could not disable internet for {user_ip}: {e}')
+        response_headers = {
+            'Location': '/',
+            'Set-Cookie': 'CAPTIVE_SESSION=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+            'Connection': 'close'
+        }
+        send_response(client_socket, 302, 'Found', response_headers, b'')
+    elif path == '/register':
+        # REGISTRO
+        body_str = body.decode('utf-8', errors='ignore')
+        params = parse_qs(body_str)
+        email = params.get('email', [''])[0]
+        password = params.get('password', [''])[0]
+        import re
+        if not re.match(r'^[a-zA-Z0-9._%+-]+@gmail\.com$', email):
+            html = '<html><body><h1>Registro fallido</h1><p>El correo debe ser nombre@gmail.com</p><a href="/register">Intentar de nuevo</a></body></html>'
+            body = html.encode('utf-8')
+            response_headers = {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Content-Length': str(len(body)),
+                'Connection': 'close'
+            }
+            send_response(client_socket, 400, 'Bad Request', response_headers, body)
+            return
+        from auth import add_user
+        try:
+            add_user(email, password)
+            html = '<html><body><h1>Registro exitoso</h1><p>Usuario creado correctamente. Ahora puedes iniciar sesión.</p><a href="/">Ir al login</a></body></html>'
+            body = html.encode('utf-8')
+            response_headers = {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Content-Length': str(len(body)),
+                'Connection': 'close'
+            }
+            send_response(client_socket, 200, 'OK', response_headers, body)
+        except Exception as e:
+            html = f'<html><body><h1>Registro fallido</h1><p>{str(e)}</p><a href="/register">Intentar de nuevo</a></body></html>'
+            body = html.encode('utf-8')
+            response_headers = {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Content-Length': str(len(body)),
+                'Connection': 'close'
+            }
+            send_response(client_socket, 400, 'Bad Request', response_headers, body)
     else:
         # 404 para otros paths
-        body = b'<html><body><h1>404 Not Found</h1></body></html>'
+        html = '<html><body><h1>404 Not Found</h1></body></html>'
+        body = html.encode('utf-8')
         response_headers = {
             'Content-Type': 'text/html; charset=utf-8',
             'Content-Length': str(len(body)),

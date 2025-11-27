@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Registro de Usuario</title>
+    <link rel="stylesheet" href="/static/base.css">
+</head>
+<body>
+    <h2>Registro de Usuario</h2>
+    <form action="/register" method="post">
+        <label for="email">Correo electrónico:</label>
+        <input type="email" id="email" name="email" required pattern="^[a-zA-Z0-9._%+-]+@gmail\.com$"><br><br>
+        <label for="password">Contraseña:</label>
+        <input type="password" id="password" name="password" required><br><br>
+        <button type="submit">Registrar</button>
+    </form>
+    <p>¿Ya tienes cuenta? <a href="/">Inicia sesión</a></p>
+</body>
+</html>

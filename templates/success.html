@@ -97,18 +97,7 @@
 </head>
 <body>
     <div class="container">
-        <div class="success-icon">
-            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
-            </svg>
-        </div>
-        
-        <h1>¡Conexión Exitosa!</h1>
-        
-        <p class="message">
-            Tu dispositivo ya tiene acceso a Internet.<br>
-            Puedes navegar libremente por la red.
-        </p>
+        <!-- Eliminado icono y cartel de éxito -->
         
         <div class="info-box">
             <p><strong>Estado:</strong> Conectado</p>
@@ -117,6 +106,9 @@
         </div>
         
         <div class="footer">
+            <form action="/logout" method="post" style="margin-bottom: 15px;">
+                <button type="submit" style="background: #764ba2; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">Cerrar sesión</button>
+            </form>
             <p>Portal Cautivo - Proyecto Redes 2025</p>
         </div>
     </div>
