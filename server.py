@@ -1,64 +1,16 @@
-#!/usr/bin/env python3
-"""
-Servidor HTTP/HTTPS para portal cautivo usando sockets puros.
-Implementación manual sin usar http.server - solo sockets y threading.
-Soporta SSL/TLS para conexiones seguras.
-Ejecutar con privilegios si se quiere que lance scripts de iptables.
-"""
-import os
-import sys
-import uuid
-import json
-import threading
-import argparse
-import subprocess
-import re
-import socket
-import secrets
-import ssl
-from urllib.parse import parse_qs
-
-from auth import verify_user, load_users
-
-ROOT = os.path.dirname(__file__)
-TEMPLATES = os.path.join(ROOT, 'templates')
-
-# sessions: session_id -> {user, ip, mac}
-SESSIONS = {}
-SESSIONS_LOCK = threading.Lock()
-
-
 def get_mac(ip):
-    """Intento simple de obtener MAC desde ARP cache (Linux)."""
-    try:
-        p = subprocess.run(['arp', '-n', ip], capture_output=True, text=True)
-        m = re.search(r'([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})', p.stdout, re.I)
-        if m:
-            return m.group(1).lower()
-    except Exception:
-        return None
-    return None
-
-
 def load_template(name):
-    """Carga un template HTML"""
-    path = os.path.join(TEMPLATES, name)
-    with open(path, 'rb') as f:
-        return f.read()
-
-
 def parse_cookies(cookie_header):
-    """Parsea las cookies del header"""
-    cookies = {}
-    if not cookie_header:
-        return cookies
-    for item in cookie_header.split(';'):
-        item = item.strip()
-        if '=' in item:
-            key, value = item.split('=', 1)
-            cookies[key] = value
-    return cookies
+"""
+Archivo de arranque para el portal cautivo.
+Toda la lógica está segmentada en la carpeta server/.
+Este archivo solo importa y ejecuta el main del servidor.
+"""
 
+from server.server_main import main
+
+if __name__ == '__main__':
+    main()
 
 def parse_http_request(request_data):
     """Parsea la petición HTTP cruda"""
