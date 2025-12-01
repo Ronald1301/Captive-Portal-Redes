@@ -18,246 +18,122 @@ Sistema de portal cautivo completo que controla el acceso a internet hasta que l
 - ✅ **Bloqueo de internet** - iptables con política DROP hasta autenticación
 - ✅ **Sistema de usuarios** - CLI + JSON + hashing SHA-256
 - ✅ **Concurrencia** - Threading para múltiples clientes simultáneos
+# Portal Cautivo - Proyecto Redes 2025
 
-### 🌟 Extras Implementados (2.5 puntos)
-- ✅ **[1.0 pto] Detección automática** - DNS falso + notificaciones en dispositivos
-- ✅ **[0.5 pto] HTTPS/SSL** - Conexiones cifradas con TLS
-- ✅ **[0.5 pto] Anti-suplantación** - Verificación IP + MAC address
-- ✅ **[0.25 pto] NAT/Masquerading** - Enmascaramiento de IPs
-- ✅ **[0.25 pto] Diseño moderno** - UI profesional con gradientes y efectos
-
-**📊 Puntuación Total: 7.5/5.0** 🏆
+Sistema de portal cautivo que controla el acceso a la red hasta que los usuarios se autentiquen. Implementado en Python puro (solo stdlib) y usando iptables vía CLI para el firewall.
 
 ---
 
-## 🚀 Inicio Rápido
+## ✨ Características principales
+
+- **Servidor HTTP propio** (sin http.server, solo sockets) para el portal de login ([server.py](server.py))
+- **Gestión de usuarios** con almacenamiento seguro en JSON y hashing SHA-256 ([users.py](users.py), [users.json](users.json))
+- **Gestión de sesiones** con expiración automática y control de concurrencia ([sessions.py](sessions.py))
+- **Firewall dinámico** usando iptables para bloquear/permitir acceso según autenticación ([firewall.py](firewall.py))
+- **Portal web moderno**: login con diseño responsive y mensajes de error/exito
+- **Sin dependencias externas**: solo Python estándar y comandos del sistema
+
+---
+
+## 🚀 Inicio rápido
 
 ### Requisitos
 - Linux (Ubuntu/Debian/CentOS)
 - Python 3.6+
-- iptables
-- Dos interfaces de red (LAN + WAN)
+- iptables instalado
+- Privilegios de root (sudo)
 
-### Instalación
+### Ejecución
 
 ```bash
-# 1. Clonar repositorio
-git clone https://github.com/tu-usuario/captive-portal.git
-cd captive-portal
-
-# 2. Dar permisos de ejecución
-chmod +x scripts/*.sh
-chmod +x generate_cert.sh
-
-# 3. [OPCIONAL] Generar certificados SSL para HTTPS
-bash generate_cert.sh
-
-# 4. Iniciar portal cautivo
-sudo ./scripts/start_captive_portal.sh
+sudo python3 main.py
 ```
 
-**¡Listo!** El portal está corriendo. Conecta dispositivos a la red y se abrirá automáticamente.
+El portal quedará escuchando en la IP y puerto configurados (por defecto 192.168.137.1:80).
 
 ---
 
-## 📱 ¿Cómo Funciona?
-
-### Para el Usuario
-
-1. **Conectarse a la red WiFi**
-2. **Notificación aparece automáticamente**: "Se requiere inicio de sesión"
-3. **Click en notificación** → Abre navegador con portal
-4. **Ingresar credenciales** (usuario: `student`, contraseña: `password`)
-5. **¡Acceso concedido!** → Internet disponible
-
-### Arquitectura Técnica
+## 📁 Estructura del proyecto
 
 ```
-┌─────────────┐
-│  Dispositivo│  
-│   Cliente   │  
-└──────┬──────┘
-       │ 1. Intenta acceder a google.com
-       ▼
-┌─────────────┐
-│ DNS Server  │  Responde: google.com → 192.168.1.1 (gateway)
-│  (puerto 53)│
-└──────┬──────┘
-       │ 2. Navegador abre http://192.168.1.1
-       ▼
-┌─────────────┐
-│  iptables   │  Redirige puertos 80/443 al portal
-│  (firewall) │
-└──────┬──────┘
-       │ 3. Muestra página de login
-       ▼
-┌─────────────┐
-│HTTP Server  │  Verifica credenciales
-│  (puerto 80)│  Crea sesión + habilita internet
-└─────────────┘
+Captive-Portal-Redes/
+├── main.py           # Arranque y ciclo de vida del portal cautivo
+├── server.py         # Servidor HTTP y lógica de login
+├── firewall.py       # Gestión de reglas iptables
+├── sessions.py       # Gestión de sesiones y expiración
+├── users.py          # Gestión de usuarios y autenticación
+├── users.json        # Base de datos de usuarios (hashes)
+├── captiveportal.md  # Enunciado y requisitos del proyecto
+├── README.md         # Este archivo
 ```
 
 ---
 
-## 📁 Estructura del Proyecto
+## 👥 Gestión de usuarios
 
-```
-captive-portal/
-├── server.py                    # Servidor HTTP/HTTPS con sockets
-├── dns_server.py                # Servidor DNS falso
-├── auth.py                      # Autenticación + hashing
-├── users.json                   # Base de datos de usuarios
-├── generate_cert.sh             # Generar certificados SSL
-│
-├── templates/
-│   ├── index.html              # Página de login
-│   └── success.html            # Página de éxito
-│
-├── scripts/
-│   ├── start_captive_portal.sh # ⭐ Inicia todo el sistema
-│   ├── stop_captive_portal.sh  # Detiene el portal
-│   ├── enable_internet.sh      # Habilita acceso para una IP
-│   ├── revoke_internet.sh      # Revoca acceso
-│   ├── disable_internet.sh     # Bloquea internet + redirecciones
-│   ├── nat_setup.sh            # Configura NAT
-│   └── detect_interfaces.sh    # Detecta interfaces LAN/WAN
-│
-└── docs/                        # Documentación detallada
-    ├── 01-DETECCION-AUTOMATICA.md
-    ├── 02-HTTPS-SSL.md
-    ├── 03-ANTI-SUPLANTACION.md
-    ├── 04-NAT-MASQUERADING.md
-    └── 05-DISENO-UX.md
-```
+Los usuarios se definen en [users.json](users.json) y se gestionan desde el propio portal (no hay CLI externa):
 
----
-
-## 👥 Gestión de Usuarios
-
-### Agregar Usuario
-```bash
-python3 auth.py add estudiante mi_contraseña
-```
-
-### Actualizar Contraseña
-```bash
-python3 auth.py update estudiante nueva_contraseña
-```
-
-### Listar Usuarios
-```bash
-python3 auth.py list
-```
+- **Agregar usuario**: Solo modificando el archivo o extendiendo [users.py](users.py)
+- **Eliminar usuario**: Idem
+- **Listar usuarios**: Desde el código o inspeccionando el JSON
 
 ---
 
 ## 🔒 Seguridad
 
-- **Tokens de sesión**: `secrets.token_urlsafe(32)` - criptográficamente seguros
-- **Hashing de contraseñas**: SHA-256 + salt + 1000 iteraciones
-- **Anti-suplantación**: Verificación dual IP + MAC address
-- **Cookies HttpOnly**: Previene acceso desde JavaScript
-- **HTTPS opcional**: Encriptación TLS para credenciales
+- Contraseñas almacenadas como SHA-256 (sin salt)
+- Acceso a la red solo tras autenticación exitosa
+- Expiración automática de sesiones
+- Firewall bloquea todo tráfico hasta login
+- Sin dependencias externas
 
 ---
 
-## 📚 Documentación
+## 🧪 Pruebas y comandos útiles
 
-Cada requisito extra tiene su propia documentación detallada en `docs/`:
-
-| Documento | Descripción |
-|-----------|-------------|
-| [01-DETECCION-AUTOMATICA.md](docs/01-DETECCION-AUTOMATICA.md) | DNS falso + notificaciones automáticas |
-| [02-HTTPS-SSL.md](docs/02-HTTPS-SSL.md) | Configuración SSL/TLS |
-| [03-ANTI-SUPLANTACION.md](docs/03-ANTI-SUPLANTACION.md) | Control de IP spoofing |
-| [04-NAT-MASQUERADING.md](docs/04-NAT-MASQUERADING.md) | NAT/Masquerading |
-| [05-DISENO-UX.md](docs/05-DISENO-UX.md) | Diseño web + UX |
-
----
-
-## 🧪 Pruebas
-
-### Verificar DNS
-```bash
-nslookup google.com 192.168.1.1
-```
-
-### Verificar HTTPS
-```bash
-curl -k https://192.168.1.1/
-```
-
-### Ver reglas iptables
+Ver reglas iptables:
 ```bash
 sudo iptables -L -v -n
 sudo iptables -t nat -L -v -n
 ```
 
-### Logs en tiempo real
+Limpiar reglas iptables:
 ```bash
-# Terminal 1: DNS logs
-sudo tail -f /var/log/dns.log
-
-# Terminal 2: Web server logs
-sudo tail -f /var/log/portal.log
-```
-
----
-
-## 🛠️ Comandos Útiles
-
-```bash
-# Detener portal
-sudo ./scripts/stop_captive_portal.sh
-
-# Habilitar internet manualmente para una IP
-sudo ./scripts/enable_internet.sh 192.168.1.50
-
-# Revocar acceso
-sudo ./scripts/revoke_internet.sh 192.168.1.50
-
-# Limpiar reglas iptables
 sudo iptables -F
 sudo iptables -t nat -F
 ```
 
 ---
 
-## 🎯 Cumplimiento de Requisitos
+## 🎯 Cumplimiento de requisitos
 
-### ✅ Requisitos Mínimos
+Tabla de cumplimiento según [captiveportal.md](captiveportal.md):
 
-| Requisito | Cumplimiento | Evidencia |
-|-----------|--------------|-----------|
-| Endpoint HTTP de inicio de sesión | ✅ | `server.py` - Socket manual, parseo HTTP |
-| Bloqueo de enrutamiento | ✅ | `disable_internet.sh` - iptables FORWARD DROP |
-| Mecanismo de cuentas | ✅ | `auth.py` - CLI + JSON + hashing |
-| Hilos/procesos para concurrencia | ✅ | `server.py` - threading.Thread por conexión |
-| Solo biblioteca estándar | ✅ | Cero dependencias externas, solo stdlib |
-| CLI del SO para firewall | ✅ | iptables + subprocess |
+| Requisito                                         | ¿Cumplido? | Evidencia (archivo)         |
+|---------------------------------------------------|:----------:|-----------------------------|
+| Endpoint http de inicio de sesión en la red        |     ✅     | [server.py](server.py)      |
+| Bloqueo de enrutamiento hasta login                |     ✅     | [firewall.py](firewall.py)  |
+| Mecanismo de definición de cuentas de usuario      |     ✅     | [users.py](users.py), [users.json](users.json) |
+| Manejo de varios usuarios concurrentes (hilos)     |     ✅     | [server.py](server.py), [sessions.py](sessions.py) |
+| Solo biblioteca estándar y CLI del SO              |     ✅     | Todo el código, README      |
 
-### ⭐ Requisitos Extras
+### Extras (no implementados en este repo base)
 
-| Requisito | Puntos | Evidencia |
-|-----------|--------|-----------|
-| Detección automática | 1.0 | `dns_server.py` + notificaciones OS |
-| HTTPS válido | 0.5 | `ssl` module + OpenSSL |
-| Anti-suplantación IP | 0.5 | Verificación IP+MAC con logs |
-| NAT/Masquerading | 0.25 | iptables MASQUERADE |
-| UX y diseño | 0.25 | Templates con gradientes + efectos |
+| Extra                                              | ¿Implementado? | Comentario |
+|----------------------------------------------------|:-------------:|------------|
+| Detección automática del portal cautivo            |       ❌       |            |
+| HTTPS válido sobre la URL del portal               |       ❌       |            |
+| Control de suplantación de IPs                     |       ❌       |            |
+| Servicio de enmascaramiento IP (NAT/Masquerading)  |       ✅       | [firewall.py](firewall.py) |
+| Experiencia de usuario y diseño web moderno        |       ✅       | [server.py](server.py) (HTML login) |
+| Creatividad                                        |       —        |            |
 
 ---
 
-## 💡 Tecnologías Usadas
+## ℹ️ Notas
 
-**Backend:**
-- Python 3 (stdlib): `socket`, `threading`, `ssl`, `hashlib`, `secrets`
-- Bash: Scripts de configuración
-- iptables: Firewall y NAT
-- OpenSSL: Generación de certificados
-
-**Frontend:**
-- HTML5
+- El sistema está pensado para pruebas en laboratorio/entorno controlado.
+- Para producción, se recomienda agregar salt a los hashes, soporte HTTPS y controles anti-suplantación.
 - CSS3 (gradientes, efectos, responsive)
 - SVG (iconos)
 
