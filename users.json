@@ -1,8 +1,5 @@
 {
-  "users": [
-    {
-      "username": "student",
-      "password": "password"
-    }
-  ]
+  "admin": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+  "usuario1": "bd94dcda26fccb4e68d6a31f9b5aac0b571ae266d822620e901ef7ebe3a11d4f",
+  "usuario2": "e8fa823a76f3aaf7068fd2068ba81d1fcb3b680bd854276ddc42d6139754240b"
 }

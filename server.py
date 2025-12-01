@@ -1,571 +1,902 @@
-#!/usr/bin/env python3
+
 """
-Servidor HTTP/HTTPS para portal cautivo usando sockets puros.
-Implementación manual sin usar http.server - solo sockets y threading.
-Soporta SSL/TLS para conexiones seguras.
-Ejecutar con privilegios si se quiere que lance scripts de iptables.
+Módulo del servidor HTTP del portal cautivo.
+Maneja las peticiones HTTP y el endpoint de login usando sockets.
 """
-import os
-import sys
-import uuid
-import json
-import threading
-import argparse
-import subprocess
-import re
+
 import socket
-import secrets
-import ssl
-from urllib.parse import parse_qs
-
-from auth import verify_user, load_users
-
-ROOT = os.path.dirname(__file__)
-TEMPLATES = os.path.join(ROOT, 'templates')
-
-# sessions: session_id -> {user, ip, mac}
-SESSIONS = {}
-SESSIONS_LOCK = threading.Lock()
+import logging
+from threading import Thread, Lock
+from urllib.parse import parse_qs, urlparse, unquote
 
 
-def get_mac(ip):
-    """Intento simple de obtener MAC desde ARP cache (Linux)."""
-    try:
-        p = subprocess.run(['arp', '-n', ip], capture_output=True, text=True)
-        m = re.search(r'([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})', p.stdout, re.I)
-        if m:
-            return m.group(1).lower()
-    except Exception:
-        return None
-    return None
-
-
-def load_template(name):
-    """Carga un template HTML"""
-    path = os.path.join(TEMPLATES, name)
-    with open(path, 'rb') as f:
-        return f.read()
-
-
-def parse_cookies(cookie_header):
-    """Parsea las cookies del header"""
-    cookies = {}
-    if not cookie_header:
-        return cookies
-    for item in cookie_header.split(';'):
-        item = item.strip()
-        if '=' in item:
-            key, value = item.split('=', 1)
-            cookies[key] = value
-    return cookies
-
-
-def parse_http_request(request_data):
-    """Parsea la petición HTTP cruda"""
-    try:
-        # Separar headers y body
-        if b'\r\n\r\n' not in request_data:
-            return None, None, None, b''
-        
-        headers_part, body = request_data.split(b'\r\n\r\n', 1)
-        lines = headers_part.split(b'\r\n')
+class HTTPRequest:
+    """Clase para parsear y representar una petición HTTP."""
+    
+    def __init__(self, raw_request):
+        """Parsea la petición HTTP cruda."""
+        lines = raw_request.split('\r\n')
         
         # Primera línea: método, path, versión
-        request_line = lines[0].decode('utf-8', errors='ignore')
-        parts = request_line.split()
-        if len(parts) < 3:
-            return None, None, None, b''
+        request_line = lines[0].split(' ')
+        self.method = request_line[0]
+        self.path = request_line[1]
+        self.version = request_line[2] if len(request_line) > 2 else 'HTTP/1.1'
         
-        method = parts[0]
-        path = parts[1]
+        # Parsear headers
+        self.headers = {}
+        i = 1
+        while i < len(lines) and lines[i]:
+            if ':' in lines[i]:
+                key, value = lines[i].split(':', 1)
+                self.headers[key.strip().lower()] = value.strip()
+            i += 1
         
-        # Headers
-        headers = {}
-        for line in lines[1:]:
-            try:
-                header_line = line.decode('utf-8', errors='ignore')
-                if ':' in header_line:
-                    key, value = header_line.split(':', 1)
-                    headers[key.strip()] = value.strip()
-            except:
-                continue
-        
-        return method, path, headers, body
-    except Exception as e:
-        print(f'Error parsing request: {e}')
-        return None, None, None, b''
+        # Body (después de línea vacía)
+        self.body = '\r\n'.join(lines[i+1:]) if i < len(lines) else ''
 
 
-def is_authorized(headers, client_ip):
-    """
-    Verifica si el cliente está autorizado.
-    Implementa control anti-suplantación de IP mediante verificación de:
-    1. Token de sesión válido
-    2. IP del cliente coincide con IP de la sesión
-    3. Dirección MAC coincide (si está disponible)
-    """
-    cookie_header = headers.get('Cookie', '')
-    cookies = parse_cookies(cookie_header)
+class CaptivePortalHandler:
+    """Manejador de peticiones HTTP para el portal cautivo."""
     
-    session_id = cookies.get('CAPTIVE_SESSION')
-    if not session_id:
-        return False
-    
-    with SESSIONS_LOCK:
-        session = SESSIONS.get(session_id)
-    
-    if not session:
-        return False
-    
-    # CONTROL ANTI-SUPLANTACIÓN:
-    # Verificar que la IP coincida con la IP registrada en la sesión
-    if session.get('ip') != client_ip:
-        # Obtener MAC actual del cliente
-        current_mac = get_mac(client_ip)
-        session_mac = session.get('mac')
+    def __init__(self, client_socket, client_address, server):
+        """
+        Inicializa el handler.
         
-        # Si tenemos ambas MACs, verificar que coincidan
-        if session_mac and current_mac:
-            if current_mac == session_mac:
-                # MAC coincide pero IP cambió - actualizar IP en sesión
-                # Esto puede pasar con DHCP renovando la lease
-                with SESSIONS_LOCK:
-                    session['ip'] = client_ip
-                print(f'⚠ IP changed for session {session_id[:8]}... (MAC: {current_mac})')
-                print(f'  Old IP: {session.get("ip")} → New IP: {client_ip}')
-                return True
+        Args:
+            client_socket: Socket del cliente
+            client_address: Dirección del cliente
+            server: Referencia al servidor
+        """
+        self.client_socket = client_socket
+        self.client_address = client_address
+        self.server = server
+        self.logger = logging.getLogger(__name__)
+    
+    def handle(self):
+        """Procesa la petición del cliente."""
+        try:
+            # Recibir datos del cliente
+            raw_request = self.client_socket.recv(8192).decode('utf-8', errors='ignore')
+            
+            if not raw_request:
+                return
+            
+            # Parsear la petición
+            request = HTTPRequest(raw_request)
+            
+            self.logger.info(f"{self.client_address[0]} - {request.method} {request.path}")
+            
+            # Procesar según el método
+            if request.method == 'GET':
+                self.do_GET(request)
+            elif request.method == 'POST':
+                self.do_POST(request)
             else:
-                # MAC no coincide - posible ataque de suplantación
-                print(f'🚨 SPOOFING ATTEMPT DETECTED!')
-                print(f'   Session {session_id[:8]}... registered to IP {session.get("ip")} (MAC: {session_mac})')
-                print(f'   But request came from IP {client_ip} (MAC: {current_mac})')
-                return False
-        else:
-            # No podemos verificar MAC - denegar por seguridad
-            print(f'⚠ IP mismatch without MAC verification for session {session_id[:8]}...')
-            print(f'   Expected: {session.get("ip")}, Got: {client_ip}')
-            return False
-    
-    return True
-
-
-def send_response(client_socket, status_code, status_text, headers, body):
-    """Envía una respuesta HTTP"""
-    try:
-        # Línea de estado
-        response = f'HTTP/1.1 {status_code} {status_text}\r\n'
-        
-        # Headers
-        for key, value in headers.items():
-            response += f'{key}: {value}\r\n'
-        
-        # Línea en blanco antes del body
-        response += '\r\n'
-        
-        # Enviar headers
-        client_socket.sendall(response.encode('utf-8'))
-        
-        # Enviar body si existe
-        if body:
-            if isinstance(body, str):
-                body = body.encode('utf-8')
-            client_socket.sendall(body)
-    except Exception as e:
-        print(f'Error sending response: {e}')
-
-
-def handle_get_request(client_socket, path, headers, client_ip):
-    """Maneja peticiones GET"""
-    authorized = is_authorized(headers, client_ip)
-    
-    # Rutas del portal
-    if path in ('/', '/index.html', '/login', '/success.html'):
-        if not authorized:
-            # Mostrar login
-            body = load_template('index.html')
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 200, 'OK', response_headers, body)
-        else:
-            # Mostrar página de éxito
-            body = load_template('success.html')
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 200, 'OK', response_headers, body)
-    else:
-        # Cualquier otra URL
-        if not authorized:
-            # Redirigir al portal
-            response_headers = {
-                'Location': '/',
-                'Connection': 'close'
-            }
-            send_response(client_socket, 302, 'Found', response_headers, b'')
-        else:
-            # Ya está autenticado
-            body = b'<html><body><h1>Access Granted</h1><p>You have internet access.</p></body></html>'
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 200, 'OK', response_headers, body)
-
-
-def handle_post_request(client_socket, path, headers, body, client_ip):
-    """Maneja peticiones POST"""
-    if path == '/login':
-        # LOGIN
-        body_str = body.decode('utf-8', errors='ignore')
-        params = parse_qs(body_str)
-        username = params.get('username', [''])[0]
-        password = params.get('password', [''])[0]
-        if verify_user(username, password):
-            session_id = secrets.token_urlsafe(32)
-            mac = get_mac(client_ip)
-            with SESSIONS_LOCK:
-                SESSIONS[session_id] = {
-                    'user': username,
-                    'ip': client_ip,
-                    'mac': mac
-                }
-            try:
-                script_path = os.path.join(ROOT, 'scripts', 'enable_internet.sh')
-                subprocess.Popen(['sudo', script_path, client_ip],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                print(f'✓ Access granted to {client_ip} (user: {username})')
-            except Exception as e:
-                print(f'⚠ Warning: Could not enable internet for {client_ip}: {e}')
-            response_headers = {
-                'Location': '/',
-                'Set-Cookie': f'CAPTIVE_SESSION={session_id}; Path=/; HttpOnly',
-                'Connection': 'close'
-            }
-            send_response(client_socket, 302, 'Found', response_headers, b'')
-        else:
-            html = '<html><body><h1>Login Failed</h1><p>Invalid credentials</p><a href="/">Try again</a></body></html>'
-            body = html.encode('utf-8')
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 401, 'Unauthorized', response_headers, body)
-    elif path == '/logout':
-        # LOGOUT
-        cookie_header = headers.get('Cookie', '')
-        cookies = parse_cookies(cookie_header)
-        session_id = cookies.get('CAPTIVE_SESSION')
-        user_ip = None
-        if session_id:
-            with SESSIONS_LOCK:
-                session = SESSIONS.pop(session_id, None)
-                if session:
-                    user_ip = session.get('ip')
-        if user_ip:
-            try:
-                script_path = os.path.join(ROOT, 'scripts', 'disable_internet.sh')
-                subprocess.Popen(['sudo', script_path, user_ip],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                print(f'✗ Access revoked for {user_ip}')
-            except Exception as e:
-                print(f'⚠ Warning: Could not disable internet for {user_ip}: {e}')
-        response_headers = {
-            'Location': '/',
-            'Set-Cookie': 'CAPTIVE_SESSION=deleted; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT',
-            'Connection': 'close'
-        }
-        send_response(client_socket, 302, 'Found', response_headers, b'')
-    elif path == '/register':
-        # REGISTRO
-        body_str = body.decode('utf-8', errors='ignore')
-        params = parse_qs(body_str)
-        email = params.get('email', [''])[0]
-        password = params.get('password', [''])[0]
-        import re
-        if not re.match(r'^[a-zA-Z0-9._%+-]+@gmail\.com$', email):
-            html = '<html><body><h1>Registro fallido</h1><p>El correo debe ser nombre@gmail.com</p><a href="/register">Intentar de nuevo</a></body></html>'
-            body = html.encode('utf-8')
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 400, 'Bad Request', response_headers, body)
-            return
-        from auth import add_user
-        try:
-            add_user(email, password)
-            html = '<html><body><h1>Registro exitoso</h1><p>Usuario creado correctamente. Ahora puedes iniciar sesión.</p><a href="/">Ir al login</a></body></html>'
-            body = html.encode('utf-8')
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 200, 'OK', response_headers, body)
-        except Exception as e:
-            html = f'<html><body><h1>Registro fallido</h1><p>{str(e)}</p><a href="/register">Intentar de nuevo</a></body></html>'
-            body = html.encode('utf-8')
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 400, 'Bad Request', response_headers, body)
-    else:
-        # 404 para otros paths
-        html = '<html><body><h1>404 Not Found</h1></body></html>'
-        body = html.encode('utf-8')
-        response_headers = {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Content-Length': str(len(body)),
-            'Connection': 'close'
-        }
-        send_response(client_socket, 404, 'Not Found', response_headers, body)
-
-
-def handle_client(client_socket, client_address):
-    """Maneja la conexión de un cliente (se ejecuta en un thread separado)"""
-    client_ip = client_address[0]
-    
-    try:
-        # Recibir datos del cliente
-        request_data = b''
-        client_socket.settimeout(5.0)  # Timeout de 5 segundos
-        
-        while True:
-            try:
-                chunk = client_socket.recv(4096)
-                if not chunk:
-                    break
-                request_data += chunk
+                self.send_error(405, 'Method Not Allowed')
                 
-                # Si encontramos el final de los headers, verificamos si necesitamos más datos
-                if b'\r\n\r\n' in request_data:
-                    # Buscar Content-Length
-                    headers_end = request_data.index(b'\r\n\r\n')
-                    headers_part = request_data[:headers_end].decode('utf-8', errors='ignore')
-                    
-                    content_length = 0
-                    for line in headers_part.split('\r\n'):
-                        if line.lower().startswith('content-length:'):
-                            try:
-                                content_length = int(line.split(':', 1)[1].strip())
-                            except:
-                                pass
-                            break
-                    
-                    # Verificar si tenemos todo el body
-                    body_start = headers_end + 4
-                    body_received = len(request_data) - body_start
-                    
-                    if body_received >= content_length:
-                        break
-            except socket.timeout:
-                break
-        
-        if not request_data:
-            return
-        
-        # Parsear la petición HTTP
-        method, path, headers, body = parse_http_request(request_data)
-        
-        if not method:
-            return
-        
-        # Log de la petición
-        print(f'{client_ip} - {method} {path}')
-        
-        # Procesar según el método HTTP
-        if method == 'GET':
-            handle_get_request(client_socket, path, headers, client_ip)
-        elif method == 'POST':
-            handle_post_request(client_socket, path, headers, body, client_ip)
-        else:
-            # Método no soportado
-            body = b'<html><body><h1>405 Method Not Allowed</h1></body></html>'
-            response_headers = {
-                'Content-Type': 'text/html; charset=utf-8',
-                'Content-Length': str(len(body)),
-                'Connection': 'close'
-            }
-            send_response(client_socket, 405, 'Method Not Allowed', response_headers, body)
+        except Exception as e:
+            self.logger.error(f"Error manejando petición: {e}")
+            self.send_error(500, 'Internal Server Error')
+        finally:
+            self.client_socket.close()
     
-    except Exception as e:
-        print(f'Error handling client {client_ip}: {e}')
-    
-    finally:
+    def send_response(self, status_code, status_message, headers, body):
+        """
+        Envía una respuesta HTTP al cliente.
+        
+        Args:
+            status_code: Código de estado HTTP
+            status_message: Mensaje de estado
+            headers: Diccionario de headers
+            body: Contenido de la respuesta
+        """
         try:
-            client_socket.close()
-        except:
-            pass
+            # Construir respuesta HTTP
+            response = f"HTTP/1.1 {status_code} {status_message}\r\n"
+            
+            # Agregar headers
+            for key, value in headers.items():
+                response += f"{key}: {value}\r\n"
+            
+            response += "\r\n"
+            
+            # Enviar respuesta
+            self.client_socket.sendall(response.encode('utf-8'))
+            
+            # Enviar body si existe
+            if body:
+                if isinstance(body, str):
+                    self.client_socket.sendall(body.encode('utf-8'))
+                else:
+                    self.client_socket.sendall(body)
+                    
+        except Exception as e:
+            self.logger.error(f"Error enviando respuesta: {e}")
+    
+    def send_error(self, status_code, message):
+        """Envía una respuesta de error."""
+        headers = {
+            'Content-Type': 'text/html',
+            'Connection': 'close'
+        }
+        body = f"<html><body><h1>{status_code} {message}</h1></body></html>"
+        self.send_response(status_code, message, headers, body)
+    
+    def _get_client_ip(self):
+        """Obtiene la dirección IP del cliente."""
+        return self.client_address[0]
+    
+    def _get_login_page(self, message=""):
+        """Genera la página HTML de login."""
+        html = f"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portal Cautivo - Iniciar Sesión</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            max-width: 400px;
+            width: 100%;
+        }}
+        h1 {{ color: #333; margin-bottom: 10px; text-align: center; }}
+        .subtitle {{ color: #666; text-align: center; margin-bottom: 30px; font-size: 14px; }}
+        .form-group {{ margin-bottom: 20px; }}
+        label {{ display: block; color: #555; margin-bottom: 5px; font-weight: 500; }}
+        input[type="text"], input[type="password"] {{
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }}
+        input:focus {{ outline: none; border-color: #667eea; }}
+        button {{
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }}
+        button:hover {{ transform: translateY(-2px); }}
+        .message {{ padding: 10px; margin-bottom: 20px; border-radius: 5px; text-align: center; }}
+        .error {{ background: #fee; color: #c33; border: 1px solid #fcc; }}
+        .info {{
+            background: #def;
+            color: #36c;
+            border: 1px solid #bcf;
+            margin-top: 20px;
+            font-size: 12px;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔒 Portal Cautivo</h1>
+        <p class="subtitle">Inicia sesión para acceder a la red</p>
+        {"<div class='message error'>" + message + "</div>" if message else ""}
+        <form method="POST" action="/login">
+            <div class="form-group">
+                <label for="username">Usuario</label>
+                <input type="text" id="username" name="username" required autofocus>
+            </div>
+            <div class="form-group">
+                <label for="password">Contraseña</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+            <button type="submit">Iniciar Sesión</button>
+        </form>
+        <div class="info">
+            <strong>Usuarios de prueba:</strong><br>
+            admin / admin123<br>
+            usuario1 / pass1234<br>
+            usuario2 / pass5678
+        </div>
+    </div>
+</body>
+</html>
+        """
+        return html
+    
+    def _get_success_page(self, username):
+        """Genera la página HTML de éxito tras el login."""
+        html = f"""
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portal Cautivo - Acceso Concedido</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }}
+        .container {{
+            background: white;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            max-width: 500px;
+            width: 100%;
+            text-align: center;
+        }}
+        h1 {{ color: #333; margin-bottom: 10px; }}
+        .success-icon {{ font-size: 64px; margin-bottom: 20px; }}
+        .username {{ color: #11998e; font-weight: 600; font-size: 20px; margin-bottom: 20px; }}
+        .message {{ color: #666; margin-bottom: 30px; line-height: 1.6; }}
+        .button {{
+            display: inline-block;
+            padding: 12px 30px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: 600;
+            transition: transform 0.2s;
+            border: none;
+            cursor: pointer;
+            font-size: 16px;
+        }}
+        .button:hover {{ transform: translateY(-2px); }}
+        .logout-button {{
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            margin-top: 15px;
+        }}
+        .info {{
+            background: #e8f5e9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #2e7d32;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-icon">✅</div>
+        <h1>¡Acceso Concedido!</h1>
+        <div class="username">Bienvenido, {username}</div>
+        <div class="message">
+            Has iniciado sesión correctamente.<br>
+            Ahora tienes acceso completo a Internet.
+        </div>
+        <a href="https://www.google.com" class="button">Ir a Internet</a>
+        <br>
+        <form method="POST" action="/logout" style="display: inline;">
+            <button type="submit" class="button logout-button">Cerrar Sesión</button>
+        </form>
+        <div class="info">
+            Tu sesión se cerrará automáticamente después de un período de inactividad.
+        </div>
+    </div>
+</body>
+</html>
+        """
+        return html
+    
+    def do_GET(self, request):
+        """Maneja las peticiones HTTP GET."""
+        client_ip = self._get_client_ip()
+        
+        # Verificar si ya está autenticado
+        if self.server.session_manager.is_authenticated(client_ip):
+            username = self.server.session_manager.get_username_by_ip(client_ip)
+            body = self._get_success_page(username)
+        else:
+            body = self._get_login_page()
+        
+        headers = {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': str(len(body.encode('utf-8'))),
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Connection': 'close'
+        }
+        
+        self.send_response(200, 'OK', headers, body)
+    
+    def do_POST(self, request):
+        """Maneja las peticiones HTTP POST."""
+        client_ip = self._get_client_ip()
+        parsed_path = urlparse(request.path)
+        
+        # Manejar logout
+        if parsed_path.path == '/logout':
+            self.server.session_manager.end_session(client_ip)
+            self.server.firewall_manager.block_ip(client_ip)
+            
+            body = self._get_login_page("Sesión cerrada correctamente")
+            self.logger.info(f"Usuario desconectado desde {client_ip}")
+        else:
+            # Parsear datos del formulario
+            params = parse_qs(request.body)
+            username = params.get('username', [''])[0]
+            password = params.get('password', [''])[0]
+            
+            # Autenticar usuario
+            if self.server.user_manager.authenticate(username, password):
+                self.server.session_manager.create_session(client_ip, username)
+                self.server.firewall_manager.allow_ip(client_ip)
+                
+                self.logger.info(f"Usuario '{username}' autenticado desde {client_ip}")
+                body = self._get_success_page(username)
+            else:
+                self.logger.warning(f"Intento de login fallido desde {client_ip} con usuario '{username}'")
+                body = self._get_login_page("Usuario o contraseña incorrectos")
+        
+        headers = {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Length': str(len(body.encode('utf-8'))),
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+            'Connection': 'close'
+        }
+        
+        self.send_response(200, 'OK', headers, body)
 
 
 class CaptivePortalServer:
-    """Servidor HTTP/HTTPS manual usando sockets puros con soporte SSL"""
+    """Servidor HTTP del portal cautivo usando sockets."""
     
-    def __init__(self, host='0.0.0.0', port=80, use_ssl=False, certfile=None, keyfile=None):
+    def __init__(self, host='0.0.0.0', port=80, user_manager=None, 
+                 session_manager=None, firewall_manager=None):
+        """
+        Inicializa el servidor del portal cautivo.
+        
+        Args:
+            host: Dirección en la que escuchar
+            port: Puerto en el que escuchar
+            user_manager: Instancia de UserManager
+            session_manager: Instancia de SessionManager
+            firewall_manager: Instancia de FirewallManager
+        """
         self.host = host
         self.port = port
-        self.use_ssl = use_ssl
-        self.certfile = certfile
-        self.keyfile = keyfile
+        self.user_manager = user_manager
+        self.session_manager = session_manager
+        self.firewall_manager = firewall_manager
         self.server_socket = None
-        self.ssl_context = None
         self.running = False
+        self.server_thread = None
+        self.logger = logging.getLogger(__name__)
     
     def start(self):
-        """Inicia el servidor"""
-        # Crear socket TCP/IP
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        
-        # Permitir reusar la dirección inmediatamente después de cerrar
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        # Bind al host y puerto
+        """Inicia el servidor HTTP."""
         try:
+            # Crear socket
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Bind y listen
             self.server_socket.bind((self.host, self.port))
+            self.server_socket.listen(5)
+            
+            self.running = True
+            
+            # Ejecutar en un hilo separado
+            self.server_thread = Thread(target=self._accept_connections, daemon=True)
+            self.server_thread.start()
+            
+            self.logger.info(f"Servidor HTTP iniciado en {self.host}:{self.port}")
+            
         except Exception as e:
-            print(f'❌ Error binding to {self.host}:{self.port}')
-            print(f'   {e}')
-            if self.port < 1024:
-                print('   Ports below 1024 require root privileges. Run with sudo.')
-            sys.exit(1)
+            self.logger.error(f"Error iniciando servidor: {e}")
+            raise
+    
+    def _accept_connections(self):
+        """Acepta conexiones entrantes."""
+        self.logger.info("Esperando conexiones...")
         
-        # Configurar SSL si está habilitado
-        if self.use_ssl:
-            if not self.certfile or not self.keyfile:
-                print('❌ Error: SSL enabled but no certificate/key files provided')
-                sys.exit(1)
-            
-            if not os.path.exists(self.certfile) or not os.path.exists(self.keyfile):
-                print('❌ Error: Certificate or key file not found')
-                print(f'   Certificate: {self.certfile}')
-                print(f'   Key: {self.keyfile}')
-                print('')
-                print('Generate certificates with: bash generate_cert.sh')
-                sys.exit(1)
-            
-            try:
-                self.ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-                self.ssl_context.load_cert_chain(certfile=self.certfile, keyfile=self.keyfile)
-                print(f'✓ SSL/TLS enabled with certificate: {self.certfile}')
-            except Exception as e:
-                print(f'❌ Error loading SSL certificates: {e}')
-                sys.exit(1)
-        
-        # Escuchar conexiones entrantes (backlog de 10 conexiones pendientes)
-        self.server_socket.listen(10)
-        
-        self.running = True
-        
-        protocol = 'HTTPS' if self.use_ssl else 'HTTP'
-        print('========================================')
-        print(f'   CAPTIVE PORTAL SERVER ({protocol})')
-        print('   (Manual Socket Implementation)')
-        print('========================================')
-        print(f'Listening on {self.host}:{self.port}')
-        print(f'Users file: {os.path.join(ROOT, "users.json")}')
-        print('Press Ctrl+C to stop')
-        print('========================================')
-        print('')
-        
-        # Loop principal: aceptar conexiones
         while self.running:
             try:
-                # Aceptar una conexión entrante (bloqueante)
-                client_socket, client_address = self.server_socket.accept()
+                # Timeout para poder verificar self.running periódicamente
+                self.server_socket.settimeout(1.0)
                 
-                # Envolver con SSL si está habilitado
-                if self.use_ssl:
-                    try:
-                        client_socket = self.ssl_context.wrap_socket(client_socket, server_side=True)
-                    except Exception as e:
-                        print(f'SSL handshake failed with {client_address[0]}: {e}')
-                        try:
-                            client_socket.close()
-                        except:
-                            pass
-                        continue
-                
-                # Manejar el cliente en un thread separado (concurrencia)
-                client_thread = threading.Thread(
-                    target=handle_client,
-                    args=(client_socket, client_address),
-                    daemon=True
-                )
-                client_thread.start()
-                
-            except KeyboardInterrupt:
-                print('\n\nShutting down server...')
-                break
+                try:
+                    client_socket, client_address = self.server_socket.accept()
+                    
+                    # Manejar cada cliente en un hilo separado
+                    client_thread = Thread(
+                        target=self._handle_client,
+                        args=(client_socket, client_address),
+                        daemon=True
+                    )
+                    client_thread.start()
+                    
+                except socket.timeout:
+                    continue
+                    
             except Exception as e:
                 if self.running:
-                    print(f'Error accepting connection: {e}')
+                    self.logger.error(f"Error aceptando conexión: {e}")
+    
+    def _handle_client(self, client_socket, client_address):
+        """
+        Maneja un cliente individual.
+        
+        Args:
+            client_socket: Socket del cliente
+            client_address: Dirección del cliente
+        """
+        handler = CaptivePortalHandler(client_socket, client_address, self)
+        handler.handle()
     
     def stop(self):
-        """Detiene el servidor"""
+        """Detiene el servidor HTTP."""
+        self.logger.info("Deteniendo servidor HTTP...")
         self.running = False
+        
         if self.server_socket:
             try:
                 self.server_socket.close()
             except:
                 pass
+        
+        if self.server_thread:
+            self.server_thread.join(timeout=5)
+        
+        self.logger.info("Servidor HTTP detenido")
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description='Captive Portal Server - Manual Socket Implementation with SSL/TLS')
-    p.add_argument('--host', default='0.0.0.0', help='Host to bind to (default: 0.0.0.0)')
-    p.add_argument('--port', type=int, help='Port to bind to (default: 80 for HTTP, 443 for HTTPS)')
-    p.add_argument('--ssl', action='store_true', help='Enable HTTPS with SSL/TLS')
-    p.add_argument('--cert', help='Path to SSL certificate file (required with --ssl)')
-    p.add_argument('--key', help='Path to SSL key file (required with --ssl)')
-    return p.parse_args()
 
 
-def main():
-    args = parse_args()
+
+
+
+# """
+# Módulo del servidor HTTP del portal cautivo.
+# Maneja las peticiones HTTP y el endpoint de login.
+# """
+
+# from http.server import HTTPServer, BaseHTTPRequestHandler
+# from urllib.parse import parse_qs, urlparse
+# import json
+# import logging
+# from threading import Thread
+
+
+# class CaptivePortalHandler(BaseHTTPRequestHandler):
+#     """Manejador de peticiones HTTP para el portal cautivo."""
     
-    # Determinar puerto por defecto
-    if args.port is None:
-        args.port = 443 if args.ssl else 80
+#     def log_message(self, format, *args):
+#         """Sobrescribe el método de logging por defecto."""
+#         logging.info(f"{self.address_string()} - {format % args}")
     
-    # Validar SSL
-    use_ssl = args.ssl
-    certfile = args.cert
-    keyfile = args.key
+#     def _set_headers(self, content_type='text/html', status_code=200):
+#         """
+#         Establece las cabeceras HTTP de la respuesta.
+        
+#         Args:
+#             content_type: Tipo de contenido MIME
+#             status_code: Código de estado HTTP
+#         """
+#         self.send_response(status_code)
+#         self.send_header('Content-type', content_type)
+#         self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+#         self.send_header('Pragma', 'no-cache')
+#         self.send_header('Expires', '0')
+#         self.end_headers()
     
-    if use_ssl and (not certfile or not keyfile):
-        print('❌ Error: --ssl requires both --cert and --key')
-        print('   Generate certificates with: bash generate_cert.sh')
-        print('   Then run: sudo python3 server.py --ssl --cert certs/server.crt --key certs/server.key')
-        sys.exit(1)
+#     def _get_client_ip(self):
+#         """
+#         Obtiene la dirección IP del cliente.
+        
+#         Returns:
+#             Dirección IP del cliente
+#         """
+#         return self.client_address[0]
     
-    server = CaptivePortalServer(
-        host=args.host, 
-        port=args.port,
-        use_ssl=use_ssl,
-        certfile=certfile,
-        keyfile=keyfile
-    )
+#     def _get_login_page(self, message=""):
+#         """
+#         Genera la página HTML de login.
+        
+#         Args:
+#             message: Mensaje a mostrar al usuario
+            
+#         Returns:
+#             Código HTML de la página de login
+#         """
+#         html = f"""
+# <!DOCTYPE html>
+# <html lang="es">
+# <head>
+#     <meta charset="UTF-8">
+#     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+#     <title>Portal Cautivo - Iniciar Sesión</title>
+#     <style>
+#         * {{
+#             margin: 0;
+#             padding: 0;
+#             box-sizing: border-box;
+#         }}
+#         body {{
+#             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+#             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+#             display: flex;
+#             justify-content: center;
+#             align-items: center;
+#             min-height: 100vh;
+#             padding: 20px;
+#         }}
+#         .container {{
+#             background: white;
+#             padding: 40px;
+#             border-radius: 10px;
+#             box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+#             max-width: 400px;
+#             width: 100%;
+#         }}
+#         h1 {{
+#             color: #333;
+#             margin-bottom: 10px;
+#             text-align: center;
+#         }}
+#         .subtitle {{
+#             color: #666;
+#             text-align: center;
+#             margin-bottom: 30px;
+#             font-size: 14px;
+#         }}
+#         .form-group {{
+#             margin-bottom: 20px;
+#         }}
+#         label {{
+#             display: block;
+#             color: #555;
+#             margin-bottom: 5px;
+#             font-weight: 500;
+#         }}
+#         input[type="text"],
+#         input[type="password"] {{
+#             width: 100%;
+#             padding: 12px;
+#             border: 2px solid #e0e0e0;
+#             border-radius: 5px;
+#             font-size: 14px;
+#             transition: border-color 0.3s;
+#         }}
+#         input[type="text"]:focus,
+#         input[type="password"]:focus {{
+#             outline: none;
+#             border-color: #667eea;
+#         }}
+#         button {{
+#             width: 100%;
+#             padding: 12px;
+#             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+#             color: white;
+#             border: none;
+#             border-radius: 5px;
+#             font-size: 16px;
+#             font-weight: 600;
+#             cursor: pointer;
+#             transition: transform 0.2s;
+#         }}
+#         button:hover {{
+#             transform: translateY(-2px);
+#         }}
+#         button:active {{
+#             transform: translateY(0);
+#         }}
+#         .message {{
+#             padding: 10px;
+#             margin-bottom: 20px;
+#             border-radius: 5px;
+#             text-align: center;
+#         }}
+#         .error {{
+#             background: #fee;
+#             color: #c33;
+#             border: 1px solid #fcc;
+#         }}
+#         .success {{
+#             background: #efe;
+#             color: #3c3;
+#             border: 1px solid #cfc;
+#         }}
+#         .info {{
+#             background: #def;
+#             color: #36c;
+#             border: 1px solid #bcf;
+#             margin-top: 20px;
+#             font-size: 12px;
+#         }}
+#     </style>
+# </head>
+# <body>
+#     <div class="container">
+#         <h1>🔒 Portal Cautivo</h1>
+#         <p class="subtitle">Inicia sesión para acceder a la red</p>
+        
+#         {"<div class='message error'>" + message + "</div>" if message else ""}
+        
+#         <form method="POST" action="/login">
+#             <div class="form-group">
+#                 <label for="username">Usuario</label>
+#                 <input type="text" id="username" name="username" required autofocus>
+#             </div>
+            
+#             <div class="form-group">
+#                 <label for="password">Contraseña</label>
+#                 <input type="password" id="password" name="password" required>
+#             </div>
+            
+#             <button type="submit">Iniciar Sesión</button>
+#         </form>
+        
+#         <div class="info">
+#             <strong>Usuarios de prueba:</strong><br>
+#             admin / admin123<br>
+#             usuario1 / pass1234<br>
+#             usuario2 / pass5678
+#         </div>
+#     </div>
+# </body>
+# </html>
+#         """
+#         return html
     
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.stop()
-        print('✓ Server stopped')
+#     def _get_success_page(self, username):
+#         """
+#         Genera la página HTML de éxito tras el login.
+        
+#         Args:
+#             username: Nombre del usuario autenticado
+            
+#         Returns:
+#             Código HTML de la página de éxito
+#         """
+#         html = f"""
+#     <!DOCTYPE html>
+#     <html lang="es">
+#     <head>
+#         <meta charset="UTF-8">
+#         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+#         <title>Portal Cautivo - Acceso Concedido</title>
+#         <style>
+#             * {{
+#                 margin: 0;
+#                 padding: 0;
+#                 box-sizing: border-box;
+#             }}
+#             body {{
+#                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+#                 background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+#                 display: flex;
+#                 justify-content: center;
+#                 align-items: center;
+#                 min-height: 100vh;
+#                 padding: 20px;
+#             }}
+#             .container {{
+#                 background: white;
+#                 padding: 40px;
+#                 border-radius: 10px;
+#                 box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+#                 max-width: 500px;
+#                 width: 100%;
+#                 text-align: center;
+#             }}
+#             h1 {{
+#                 color: #333;
+#                 margin-bottom: 10px;
+#             }}
+#             .success-icon {{
+#                 font-size: 64px;
+#                 margin-bottom: 20px;
+#             }}
+#             .username {{
+#                 color: #11998e;
+#                 font-weight: 600;
+#                 font-size: 20px;
+#                 margin-bottom: 20px;
+#             }}
+#             .message {{
+#                 color: #666;
+#                 margin-bottom: 30px;
+#                 line-height: 1.6;
+#             }}
+#             .button {{
+#                 display: inline-block;
+#                 padding: 12px 30px;
+#                 background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+#                 color: white;
+#                 text-decoration: none;
+#                 border-radius: 5px;
+#                 font-weight: 600;
+#                 transition: transform 0.2s;
+#                 border: none;
+#                 cursor: pointer;
+#                 font-size: 16px;
+#             }}
+#             .button:hover {{
+#                 transform: translateY(-2px);
+#             }}
+#             .button:active {{
+#                 transform: translateY(0);
+#             }}
+#             .logout-button {{
+#                 background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+#                 margin-top: 15px;
+#             }}
+#             .info {{
+#                 background: #e8f5e9;
+#                 padding: 15px;
+#                 border-radius: 5px;
+#                 margin-top: 20px;
+#                 font-size: 14px;
+#                 color: #2e7d32;
+#             }}
+#         </style>
+#     </head>
+#     <body>
+#         <div class="container">
+#             <div class="success-icon">✅</div>
+#             <h1>¡Acceso Concedido!</h1>
+#             <div class="username">Bienvenido, {username}</div>
+#             <div class="message">
+#                 Has iniciado sesión correctamente.<br>
+#                 Ahora tienes acceso completo a Internet.
+#             </div>
+#             <a href="https://www.google.com" class="button">Ir a Internet</a>
+#             <br>
+#             <form method="POST" action="/logout" style="display: inline;">
+#                 <button type="submit" class="button logout-button">Cerrar Sesión</button>
+#             </form>
+#             <div class="info">
+#                 Tu sesión se cerrará automáticamente después de un período de inactividad.
+#             </div>
+#         </div>
+#     </body>
+#     </html>
+#         """
+#         return html
+    
+#     def do_GET(self):
+#         """Maneja las peticiones HTTP GET."""
+#         client_ip = self._get_client_ip()
+        
+#         # Obtener referencias a los managers desde el servidor
+#         session_manager = self.server.session_manager
+        
+#         # Verificar si ya está autenticado
+#         if session_manager.is_authenticated(client_ip):
+#             username = session_manager.get_username_by_ip(client_ip)
+#             self._set_headers()
+#             self.wfile.write(self._get_success_page(username).encode())
+#         else:
+#             # Mostrar página de login
+#             self._set_headers()
+#             self.wfile.write(self._get_login_page().encode())
+    
+#     def do_POST(self):
+#         """Maneja las peticiones HTTP POST."""
+#         client_ip = self._get_client_ip()
+#         parsed_path = urlparse(self.path)
+    
+#     # Manejar logout
+#         if parsed_path.path == '/logout':
+#             # Terminar sesión
+#             self.server.session_manager.end_session(client_ip)
+            
+#             # Bloquear IP en el firewall
+#             self.server.firewall_manager.block_ip(client_ip)
+            
+#             # Redirigir a página de login con mensaje
+#             self._set_headers()
+#             self.wfile.write(self._get_login_page("Sesión cerrada correctamente").encode())
+#             logging.info(f"Usuario desconectado desde {client_ip}")
+#             return
+        
+#         # Leer el contenido del POST
+#         content_length = int(self.headers['Content-Length'])
+#         post_data = self.rfile.read(content_length).decode('utf-8')
+#         params = parse_qs(post_data)
+        
+#         # Obtener credenciales
+#         username = params.get('username', [''])[0]
+#         password = params.get('password', [''])[0]
+        
+#         # Obtener referencias a los managers desde el servidor
+#         user_manager = self.server.user_manager
+#         session_manager = self.server.session_manager
+#         firewall_manager = self.server.firewall_manager
+        
+#         # Autenticar usuario
+#         if user_manager.authenticate(username, password):
+#             # Crear sesión
+#             session_manager.create_session(client_ip, username)
+            
+#             # Permitir acceso en el firewall
+#             firewall_manager.allow_ip(client_ip)
+            
+#             logging.info(f"Usuario '{username}' autenticado desde {client_ip}")
+            
+#             # Mostrar página de éxito
+#             self._set_headers()
+#             self.wfile.write(self._get_success_page(username).encode())
+#         else:
+#             # Autenticación fallida
+#             logging.warning(f"Intento de login fallido desde {client_ip} con usuario '{username}'")
+            
+#             self._set_headers()
+#             self.wfile.write(self._get_login_page("Usuario o contraseña incorrectos").encode())
 
 
-if __name__ == '__main__':
-    main()
+# class CaptivePortalServer:
+#     """Servidor HTTP del portal cautivo con soporte multihilo."""
+    
+#     def __init__(self, host='0.0.0.0', port=80, user_manager=None, 
+#                  session_manager=None, firewall_manager=None):
+#         """
+#         Inicializa el servidor del portal cautivo.
+        
+#         Args:
+#             host: Dirección en la que escuchar
+#             port: Puerto en el que escuchar
+#             user_manager: Instancia de UserManager
+#             session_manager: Instancia de SessionManager
+#             firewall_manager: Instancia de FirewallManager
+#         """
+#         self.host = host
+#         self.port = port
+#         self.user_manager = user_manager
+#         self.session_manager = session_manager
+#         self.firewall_manager = firewall_manager
+#         self.server = None
+#         self.server_thread = None
+    
+#     def start(self):
+#         """Inicia el servidor HTTP."""
+#         self.server = HTTPServer((self.host, self.port), CaptivePortalHandler)
+        
+#         # Adjuntar los managers al servidor para que el handler pueda acceder
+#         self.server.user_manager = self.user_manager
+#         self.server.session_manager = self.session_manager
+#         self.server.firewall_manager = self.firewall_manager
+        
+#         # Ejecutar en un hilo separado
+#         self.server_thread = Thread(target=self.server.serve_forever, daemon=True)
+#         self.server_thread.start()
+        
+#         logging.info(f"Servidor HTTP iniciado en {self.host}:{self.port}")
+    
+#     def stop(self):
+#         """Detiene el servidor HTTP."""
+#         if self.server:
+#             self.server.shutdown()
+#             self.server.server_close()
+#             logging.info("Servidor HTTP detenido")
+
