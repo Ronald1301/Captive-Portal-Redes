@@ -1,15 +1,63 @@
+#!/usr/bin/env python3
 """
-Archivo de arranque para el servidor DNS del portal cautivo.
-Toda la lógica está segmentada en la carpeta dns_server/.
-Este archivo solo importa y ejecuta el servidor segmentado.
+Servidor DNS falso para portal cautivo.
+Redirige todas las consultas DNS a la IP del gateway (este servidor).
 """
+import socket
+import struct
+import threading
+import argparse
 
-from dns_server.server import DNSServer
 
-if __name__ == "__main__":
-    # Puedes ajustar la IP de respuesta según tu red
-    dns = DNSServer(listen_ip='0.0.0.0', port=53, response_ip='192.168.1.1')
-    dns.serve_forever()
+class DNSQuery:
+    def __init__(self, data):
+        self.data = data
+        self.domain = ''
+        
+        # Parsear el nombre de dominio de la consulta DNS
+        tipo = (data[2] >> 3) & 15
+        if tipo == 0:  # Query estándar
+            ini = 12
+            lon = data[ini]
+            while lon != 0:
+                self.domain += data[ini+1:ini+lon+1].decode('utf-8', errors='ignore') + '.'
+                ini += lon + 1
+                lon = data[ini]
+    
+    def response(self, ip):
+        """Genera una respuesta DNS apuntando al IP especificado"""
+        if not self.domain:
+            return b''
+        
+        packet = b''
+        packet += self.data[:2]  # Transaction ID
+        packet += b'\x81\x80'  # Flags: respuesta estándar
+        packet += self.data[4:6]  # Questions
+        packet += self.data[4:6]  # Answer RRs (mismo que Questions)
+        packet += b'\x00\x00'  # Authority RRs
+        packet += b'\x00\x00'  # Additional RRs
+        packet += self.data[12:]  # Query original
+        
+        # Respuesta: apuntar al IP del portal
+        packet += b'\xc0\x0c'  # Pointer to domain name
+        packet += b'\x00\x01'  # Type A
+        packet += b'\x00\x01'  # Class IN
+        packet += b'\x00\x00\x00\x3c'  # TTL (60 segundos)
+        packet += b'\x00\x04'  # Data length (4 bytes para IPv4)
+        
+        # Convertir IP string a bytes
+        packet += b''.join([struct.pack('!B', int(x)) for x in ip.split('.')])
+        
+        return packet
+
+
+class DNSServer:
+    def __init__(self, host='0.0.0.0', port=53, redirect_ip='192.168.1.1'):
+        self.host = host
+        self.port = port
+        self.redirect_ip = redirect_ip
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.running = False
     
     def start(self):
         """Inicia el servidor DNS"""
