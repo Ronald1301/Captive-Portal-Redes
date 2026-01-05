@@ -290,7 +290,13 @@ class CaptivePortalHandler:
                     self.logger.info(f"Nuevo usuario registrado: '{username}' desde {client_ip}")
                     body = self._get_success_page(username)
                 else:
-                    body = self._get_register_page("El usuario ya existe o hay un error en el registro")
+                    # Verificar si el usuario existe en la base de datos
+                    if username in self.server.user_manager.list_users():
+                        error_msg = f"El usuario '{username}' ya existe. Por favor, elige otro nombre de usuario o inicia sesión."
+                    else:
+                        error_msg = "Error al registrar el usuario. Intenta de nuevo."
+                    
+                    body = self._get_register_page(error_msg)
                     self.logger.warning(f"Intento de registro fallido para usuario '{username}' desde {client_ip}")
         else:
             # Parsear datos del formulario (login)
@@ -298,8 +304,18 @@ class CaptivePortalHandler:
             username = params.get('username', [''])[0]
             password = params.get('password', [''])[0]
             
+            # Verificar si el usuario ya está logueado desde otra IP
+            is_logged_in, other_ip = self.server.session_manager.is_user_already_logged_in(
+                username, 
+                exclude_ip=client_ip
+            )
+            
+            if is_logged_in:
+                # El usuario ya está logueado desde otra IP
+                self.logger.warning(f"Intento de login duplicado para '{username}' desde {client_ip} (ya está logueado desde {other_ip})")
+                body = self._get_login_page(f"Este usuario ya está logueado desde otra dirección IP ({other_ip})")
             # Autenticar usuario
-            if self.server.user_manager.authenticate(username, password):
+            elif self.server.user_manager.authenticate(username, password):
                 self.server.session_manager.create_session(client_ip, username)
                 self.server.firewall_manager.allow_ip(client_ip)
                 

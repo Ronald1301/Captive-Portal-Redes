@@ -103,3 +103,29 @@ class SessionManager:
             if ip_address in self.sessions:
                 return self.sessions[ip_address]['username']
             return None
+    
+    def is_user_already_logged_in(self, username, exclude_ip=None):
+        """
+        Verifica si un usuario ya está logueado desde otra IP.
+        
+        Args:
+            username: Nombre del usuario a verificar
+            exclude_ip: IP que se debe excluir de la búsqueda (generalmente la IP actual)
+            
+        Returns:
+            Tupla (está_logueado, ip_donde_está_logueado)
+        """
+        with self.lock:
+            current_time = time.time()
+            
+            for ip, session in list(self.sessions.items()):
+                # Saltar la IP excluida (la actual del cliente)
+                if exclude_ip and ip == exclude_ip:
+                    continue
+                
+                # Verificar si la sesión no ha expirado
+                if current_time - session['last_activity'] <= self.session_timeout:
+                    if session['username'] == username:
+                        return True, ip
+            
+            return False, None
