@@ -6,8 +6,12 @@ Maneja las peticiones HTTP y el endpoint de login usando sockets.
 
 import socket
 import logging
+import os
 from threading import Thread, Lock
 from urllib.parse import parse_qs, urlparse, unquote
+
+# Ruta de los templates
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), 'templates')
 
 
 class HTTPRequest:
@@ -34,6 +38,29 @@ class HTTPRequest:
         
         # Body (después de línea vacía)
         self.body = '\r\n'.join(lines[i+1:]) if i < len(lines) else ''
+
+
+def load_template(template_name):
+    """
+    Carga un template HTML desde el directorio de templates.
+    
+    Args:
+        template_name: Nombre del archivo template
+        
+    Returns:
+        Contenido del template o None si no existe
+    """
+    try:
+        template_path = os.path.join(TEMPLATES_DIR, template_name)
+        if os.path.exists(template_path):
+            with open(template_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        else:
+            logging.error(f"Template no encontrado: {template_path}")
+            return None
+    except Exception as e:
+        logging.error(f"Error cargando template {template_name}: {e}")
+        return None
 
 
 class CaptivePortalHandler:
@@ -128,188 +155,91 @@ class CaptivePortalHandler:
         return self.client_address[0]
     
     def _get_login_page(self, message=""):
-        """Genera la página HTML de login."""
-        html = f"""
+        """Carga y retorna la página HTML de login desde el template."""
+        html = load_template('index.html')
+        
+        if html is None:
+            # Fallback si el template no existe
+            html = """
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Portal Cautivo - Iniciar Sesión</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            padding: 20px;
-        }}
-        .container {{
-            background: white;
-            padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
-            max-width: 400px;
-            width: 100%;
-        }}
-        h1 {{ color: #333; margin-bottom: 10px; text-align: center; }}
-        .subtitle {{ color: #666; text-align: center; margin-bottom: 30px; font-size: 14px; }}
-        .form-group {{ margin-bottom: 20px; }}
-        label {{ display: block; color: #555; margin-bottom: 5px; font-weight: 500; }}
-        input[type="text"], input[type="password"] {{
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 5px;
-            font-size: 14px;
-            transition: border-color 0.3s;
-        }}
-        input:focus {{ outline: none; border-color: #667eea; }}
-        button {{
-            width: 100%;
-            padding: 12px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 5px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: transform 0.2s;
-        }}
-        button:hover {{ transform: translateY(-2px); }}
-        .message {{ padding: 10px; margin-bottom: 20px; border-radius: 5px; text-align: center; }}
-        .error {{ background: #fee; color: #c33; border: 1px solid #fcc; }}
-        .info {{
-            background: #def;
-            color: #36c;
-            border: 1px solid #bcf;
-            margin-top: 20px;
-            font-size: 12px;
-        }}
-    </style>
+    <title>Portal Cautivo - Error</title>
 </head>
 <body>
-    <div class="container">
-        <h1>🔒 Portal Cautivo</h1>
-        <p class="subtitle">Inicia sesión para acceder a la red</p>
-        {"<div class='message error'>" + message + "</div>" if message else ""}
-        <form method="POST" action="/login">
-            <div class="form-group">
-                <label for="username">Usuario</label>
-                <input type="text" id="username" name="username" required autofocus>
-            </div>
-            <div class="form-group">
-                <label for="password">Contraseña</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-            <button type="submit">Iniciar Sesión</button>
-        </form>
-        <div class="info">
-            <strong>Usuarios de prueba:</strong><br>
-            admin / admin123<br>
-            usuario1 / pass1234<br>
-            usuario2 / pass5678
-        </div>
-    </div>
+    <h1>Error: No se puede cargar el portal</h1>
+    <p>El archivo de template no se encontró.</p>
 </body>
 </html>
-        """
+            """
+        
         return html
     
     def _get_success_page(self, username):
-        """Genera la página HTML de éxito tras el login."""
-        html = f"""
+        """Carga y retorna la página HTML de éxito desde el template."""
+        html = load_template('success.html')
+        
+        if html is None:
+            # Fallback si el template no existe
+            html = f"""
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Portal Cautivo - Acceso Concedido</title>
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            padding: 20px;
-        }}
-        .container {{
-            background: white;
-            padding: 40px;
-            border-radius: 10px;
-            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
-            max-width: 500px;
-            width: 100%;
-            text-align: center;
-        }}
-        h1 {{ color: #333; margin-bottom: 10px; }}
-        .success-icon {{ font-size: 64px; margin-bottom: 20px; }}
-        .username {{ color: #11998e; font-weight: 600; font-size: 20px; margin-bottom: 20px; }}
-        .message {{ color: #666; margin-bottom: 30px; line-height: 1.6; }}
-        .button {{
-            display: inline-block;
-            padding: 12px 30px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            font-weight: 600;
-            transition: transform 0.2s;
-            border: none;
-            cursor: pointer;
-            font-size: 16px;
-        }}
-        .button:hover {{ transform: translateY(-2px); }}
-        .logout-button {{
-            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
-            margin-top: 15px;
-        }}
-        .info {{
-            background: #e8f5e9;
-            padding: 15px;
-            border-radius: 5px;
-            margin-top: 20px;
-            font-size: 14px;
-            color: #2e7d32;
-        }}
-    </style>
 </head>
 <body>
-    <div class="container">
-        <div class="success-icon">✅</div>
-        <h1>¡Acceso Concedido!</h1>
-        <div class="username">Bienvenido, {username}</div>
-        <div class="message">
-            Has iniciado sesión correctamente.<br>
-            Ahora tienes acceso completo a Internet.
-        </div>
-        <a href="https://www.google.com" class="button">Ir a Internet</a>
-        <br>
-        <form method="POST" action="/logout" style="display: inline;">
-            <button type="submit" class="button logout-button">Cerrar Sesión</button>
-        </form>
-        <div class="info">
-            Tu sesión se cerrará automáticamente después de un período de inactividad.
-        </div>
-    </div>
+    <h1>¡Acceso Concedido!</h1>
+    <p>Bienvenido, {username}</p>
+    <p>Has iniciado sesión correctamente.</p>
 </body>
 </html>
-        """
+            """
+        
+        return html
+    
+    def _get_register_page(self, message=""):
+        """Carga y retorna la página HTML de registro desde el template."""
+        html = load_template('register.html')
+        
+        if html is None:
+            # Fallback si el template no existe
+            html = """
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Portal Cautivo - Registro</title>
+</head>
+<body>
+    <h1>Crear Cuenta</h1>
+    <form method="post" action="/register">
+        <label for="username">Usuario</label>
+        <input type="text" id="username" name="username" required>
+        <label for="email">Correo</label>
+        <input type="email" id="email" name="email" required>
+        <label for="password">Contraseña</label>
+        <input type="password" id="password" name="password" required>
+        <button type="submit">Registrarse</button>
+    </form>
+    <p><a href="/">Volver a login</a></p>
+</body>
+</html>
+            """
+        
         return html
     
     def do_GET(self, request):
         """Maneja las peticiones HTTP GET."""
         client_ip = self._get_client_ip()
+        parsed_path = urlparse(request.path)
         
+        # Manejar ruta de registro
+        if parsed_path.path == '/register':
+            body = self._get_register_page()
         # Verificar si ya está autenticado
-        if self.server.session_manager.is_authenticated(client_ip):
+        elif self.server.session_manager.is_authenticated(client_ip):
             username = self.server.session_manager.get_username_by_ip(client_ip)
             body = self._get_success_page(username)
         else:
@@ -338,8 +268,32 @@ class CaptivePortalHandler:
             
             body = self._get_login_page("Sesión cerrada correctamente")
             self.logger.info(f"Usuario desconectado desde {client_ip}")
-        else:
+        # Manejar registro de usuario
+        elif parsed_path.path == '/register':
             # Parsear datos del formulario
+            params = parse_qs(request.body)
+            username = params.get('username', [''])[0]
+            email = params.get('email', [''])[0]
+            password = params.get('password', [''])[0]
+            
+            # Validar que todos los campos estén presentes
+            if not username or not email or not password:
+                body = self._get_register_page("Por favor completa todos los campos")
+                self.logger.warning(f"Intento de registro incompleto desde {client_ip}")
+            else:
+                # Intentar registrar el usuario
+                if self.server.user_manager.register(username, email, password):
+                    # Registrar exitoso, crear sesión y autenticar
+                    self.server.session_manager.create_session(client_ip, username)
+                    self.server.firewall_manager.allow_ip(client_ip)
+                    
+                    self.logger.info(f"Nuevo usuario registrado: '{username}' desde {client_ip}")
+                    body = self._get_success_page(username)
+                else:
+                    body = self._get_register_page("El usuario ya existe o hay un error en el registro")
+                    self.logger.warning(f"Intento de registro fallido para usuario '{username}' desde {client_ip}")
+        else:
+            # Parsear datos del formulario (login)
             params = parse_qs(request.body)
             username = params.get('username', [''])[0]
             password = params.get('password', [''])[0]

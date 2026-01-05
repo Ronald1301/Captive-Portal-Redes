@@ -118,5 +118,24 @@ class UserManager:
         """
         with self.lock:
             return list(self.users.keys())
+    
+    def register(self, username, email, password):
+        """
+        Registra un nuevo usuario (alias de add_user).
+        
+        Args:
+            username: Nombre de usuario
+            email: Email del usuario (opcional, solo para validación)
+            password: Contraseña en texto plano
+            
+        Returns:
+            True si se registró exitosamente, False si el usuario ya existe
+        """
+        # Validar que el username no esté vacío
+        if not username or not password:
+            return False
+        
+        # Usar add_user que ya maneja el lock y la lógica
+        return self.add_user(username, password)
         
 

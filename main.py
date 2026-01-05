@@ -2,12 +2,34 @@ import logging
 import signal
 import sys
 import time
+
 from threading import Thread
+import subprocess
+import os
 
 from users import UserManager
 from sessions import SessionManager
 from firewall import FirewallManager
+
 from server import CaptivePortalServer
+
+# Hilo para servidor DNS falso
+class DNSFakeServerThread(Thread):
+    def __init__(self, ip_gateway):
+        super().__init__(daemon=True)
+        self.ip_gateway = ip_gateway
+        self.process = None
+
+    def run(self):
+        self.process = subprocess.Popen([
+            sys.executable, os.path.join(os.path.dirname(__file__), 'dns_server.py'),
+            '--ip', self.ip_gateway
+        ])
+
+    def stop(self):
+        if self.process:
+            self.process.terminate()
+            self.process.wait()
 
 class CaptivePortal:
      
@@ -31,13 +53,15 @@ class CaptivePortal:
         self.session_manager = SessionManager(session_timeout=session_timeout)
         self.firewall_manager = FirewallManager(interface=interface)
         
+        self.gateway_ip = '192.168.137.1'  # Cambia si tu gateway es diferente
         self.server = CaptivePortalServer(
-            host='192.168.137.1',
+            host=self.gateway_ip,
             port=port,
             user_manager=self.user_manager,
             session_manager=self.session_manager,
             firewall_manager=self.firewall_manager
         )
+        self.dns_thread = DNSFakeServerThread(ip_gateway=self.gateway_ip)
         
         # Hilo para limpieza de sesiones
         self.cleanup_thread = None
@@ -57,15 +81,15 @@ class CaptivePortal:
         
         # Configurar firewall
         self.setup()
-        
+        # Iniciar servidor DNS falso para detección automática
+        self.logger.info("Iniciando servidor DNS falso para detección automática de portal cautivo...")
+        self.dns_thread.start()
         # Iniciar servidor HTTP
         self.server.start()
-        
         # Iniciar hilo de limpieza de sesiones
         self.running = True
         self.cleanup_thread = Thread(target=self._cleanup_sessions_loop, daemon=True)
         self.cleanup_thread.start()
-        
         self.logger.info(f"Portal cautivo activo en puerto {self.port}")
         self.logger.info(f"Interfaz de red: {self.interface}")
         self.logger.info(f"Usuarios registrados: {len(self.user_manager.list_users())}")
@@ -79,19 +103,18 @@ class CaptivePortal:
         
         # Detener servidor HTTP
         self.server.stop()
-        
+        # Detener servidor DNS falso
+        self.logger.info("Deteniendo servidor DNS falso...")
+        self.dns_thread.stop()
         # Detener hilo de limpieza
         self.running = False
-        
         # Bloquear todas las IPs autenticadas
         self.logger.info("Revocando accesos...")
         for ip in list(self.session_manager.sessions.keys()):
             self.firewall_manager.block_ip(ip)
-        
         # Limpiar reglas de firewall
         self.logger.info("Limpiando reglas de firewall...")
         self.firewall_manager.clear_rules()
-        
         self.logger.info("Portal cautivo detenido correctamente")
     
     def _cleanup_sessions_loop(self):
