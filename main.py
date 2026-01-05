@@ -19,22 +19,43 @@ class DNSFakeServerThread(Thread):
         super().__init__(daemon=True)
         self.ip_gateway = ip_gateway
         self.process = None
+        self.logger = logging.getLogger(__name__)
 
     def run(self):
-        self.process = subprocess.Popen([
-            sys.executable, os.path.join(os.path.dirname(__file__), 'dns_server.py'),
-            '--ip', self.ip_gateway
-        ])
+        """Inicia el servidor DNS en un subprocess."""
+        try:
+            self.logger.info(f"Iniciando proceso DNS con puerta de enlace: {self.ip_gateway}")
+            self.process = subprocess.Popen([
+                sys.executable, 
+                os.path.join(os.path.dirname(__file__), 'dns_server.py'),
+                '--ip', self.ip_gateway
+            ])
+            self.logger.info(f"Proceso DNS iniciado con PID: {self.process.pid}")
+            
+            # Esperar a que el proceso termine
+            self.process.wait()
+            self.logger.warning("Proceso DNS terminó inesperadamente")
+        except Exception as e:
+            self.logger.error(f"Error iniciando proceso DNS: {e}")
 
     def stop(self):
+        """Detiene el servidor DNS."""
         if self.process:
-            self.process.terminate()
-            self.process.wait()
+            try:
+                self.logger.info("Terminando proceso DNS...")
+                self.process.terminate()
+                self.process.wait(timeout=5)
+                self.logger.info("Proceso DNS terminado correctamente")
+            except subprocess.TimeoutExpired:
+                self.logger.warning("Timeout esperando DNS, forzando kill...")
+                self.process.kill()
+            except Exception as e:
+                self.logger.error(f"Error deteniendo DNS: {e}")
 
 class CaptivePortal:
      
     
-    def __init__(self, interface="eth0", port=80, session_timeout=3600):
+    def __init__(self, interface="eth0", port=80, session_timeout=3600, gateway_ip=None):
          
         self.interface = interface
         self.port = port
@@ -53,7 +74,14 @@ class CaptivePortal:
         self.session_manager = SessionManager(session_timeout=session_timeout)
         self.firewall_manager = FirewallManager(interface=interface)
         
-        self.gateway_ip = '192.168.137.1'  # Cambia si tu gateway es diferente
+        # Usar IP de gateway proporcionada o usar default
+        if gateway_ip is None:
+            self.gateway_ip = self._get_gateway_ip()
+        else:
+            self.gateway_ip = gateway_ip
+        
+        self.logger.info(f"IP del Gateway (Portal): {self.gateway_ip}")
+        
         self.server = CaptivePortalServer(
             host=self.gateway_ip,
             port=port,
@@ -66,6 +94,23 @@ class CaptivePortal:
         # Hilo para limpieza de sesiones
         self.cleanup_thread = None
         self.running = False
+    
+    def _get_gateway_ip(self):
+        """
+        Intenta obtener la IP del gateway (interfaz local).
+        Si falla, devuelve una IP por defecto.
+        """
+        try:
+            import socket
+            hostname = socket.gethostname()
+            gateway_ip = socket.gethostbyname(hostname)
+            self.logger.info(f"IP del gateway detectada: {gateway_ip}")
+            return gateway_ip
+        except Exception as e:
+            self.logger.warning(f"No se pudo detectar la IP del gateway: {e}")
+            default_ip = '192.168.137.1'
+            self.logger.warning(f"Usando IP por defecto: {default_ip}")
+            return default_ip
 
     def setup(self):
          
@@ -169,16 +214,29 @@ if __name__ == "__main__":
     
     try:
         # Configuración
-        INTERFACE = "eth0"  # Cambiar según tu interfaz de red
-        PORT = 80          # Puerto HTTP (requiere privilegios de root)
-        SESSION_TIMEOUT = 3600  # 1 hora
+        INTERFACE = "eth0"         # Cambiar según tu interfaz de red
+        PORT = 80                  # Puerto HTTP (requiere privilegios de root)
+        SESSION_TIMEOUT = 3600     # 1 hora
+        GATEWAY_IP = None          # Dejar None para auto-detectar, o especificar manualmente
         
-        # Verificar si se ejecuta como root (necesario para iptables)
+        # Verificar si se ejecuta como root (necesario para iptables y DNS)
         import os
         if os.geteuid() != 0:
             print("ERROR: Este script debe ejecutarse como root (sudo)")
-            print("Uso: sudo python3 main.py")
+            print("Uso: sudo python3 main.py [--gateway-ip IP]")
             sys.exit(1)
+        
+        # Parsear argumentos de línea de comandos
+        if len(sys.argv) > 1:
+            if sys.argv[1] == '--gateway-ip' and len(sys.argv) > 2:
+                GATEWAY_IP = sys.argv[2]
+                print(f"IP del gateway especificada: {GATEWAY_IP}")
+            elif sys.argv[1] in ['-h', '--help']:
+                print("Uso: sudo python3 main.py [opciones]")
+                print("\nOpciones:")
+                print("  --gateway-ip IP    Especificar IP del gateway (default: auto-detectar)")
+                print("  -h, --help         Mostrar esta ayuda")
+                sys.exit(0)
         
         # Registrar manejador de señales
         signal.signal(signal.SIGINT, signal_handler)
@@ -188,7 +246,8 @@ if __name__ == "__main__":
         portal = CaptivePortal(
             interface=INTERFACE,
             port=PORT,
-            session_timeout=SESSION_TIMEOUT
+            session_timeout=SESSION_TIMEOUT,
+            gateway_ip=GATEWAY_IP
         )
         
         portal.start()
