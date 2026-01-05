@@ -36,10 +36,11 @@ class FirewallManager:
             self._run_command(["sysctl", "-w", "net.ipv4.ip_forward=1"])
             self._run_command(["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])
             
-            # Permitir conexiones establecidas y relacionadas
+            # Permitir conexiones establecidas y relacionadas SOLO desde el interior (origen)
+            # Esto es más restrictivo que permitir en ambas direcciones
             self._run_command([
-                "iptables", "-A", "FORWARD", "-m", "state",
-                "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"
+                "iptables", "-A", "FORWARD", "-m", "conntrack",
+                "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"
             ])
             
             # Bloquear todo el forwarding por defecto (política DROP)
@@ -72,16 +73,39 @@ class FirewallManager:
     def block_ip(self, ip_address):
          
         with self.lock:
-            # Eliminar regla que permite forwarding desde esta IP
-            success = self._run_command([
+            # Primero, eliminar conexiones establecidas de esta IP usando conntrack
+            # Esto cierra inmediatamente los sockets TCP/UDP activos
+            self._run_command([
+                "conntrack", "-D", "-s", ip_address
+            ])
+            
+            # Enviar RST (reset) a todas las conexiones TCP de esta IP
+            # Para cerrar más agresivamente las conexiones existentes
+            self._run_command([
+                "iptables", "-A", "FORWARD",
+                "-s", ip_address, "-j", "REJECT", "--reject-with", "tcp-reset"
+            ])
+            
+            # Agregar regla de DROP explícito para bloquear todo tráfico desde esta IP
+            self._run_command([
+                "iptables", "-I", "FORWARD", "1",
+                "-s", ip_address, "-j", "DROP"
+            ])
+            
+            # También eliminar la regla de ACCEPT si existe
+            self._run_command([
                 "iptables", "-D", "FORWARD",
                 "-s", ip_address, "-j", "ACCEPT"
             ])
             
-            if success:
-                self.logger.info(f"IP bloqueada: {ip_address}")
+            # Flush las conexiones de conntrack una vez más para asegurar
+            self._run_command([
+                "conntrack", "-D", "-s", ip_address
+            ])
             
-            return success
+            self.logger.info(f"IP bloqueada y conexiones establecidas eliminadas: {ip_address}")
+            
+            return True
     
     def clear_rules(self):
          
